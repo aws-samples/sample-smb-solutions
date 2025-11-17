@@ -256,6 +256,14 @@ This project is licensed under the Apache License 2.0 - see [LICENSE](LICENSE) f
 
 ## Support
 
+### Authors & Support Contacts
+
+- **Mike Revitt** - [revittmk@amazon.com](mailto:revittmk@amazon.com)
+- **Hardik Panchal** - [hkvp@amazon.com](mailto:hkvp@amazon.com)
+- **Wei Chen** - [wchemz@amazon.com](mailto:wchemz@amazon.com)
+
+### Resources
+
 - **Documentation**: [AWS Labs MCP Servers](https://awslabs.github.io/mcp/servers/aws-dms-mcp-server/)
 - **Issues**: [GitHub Issues](https://github.com/awslabs/mcp/issues)
 - **AWS DMS Documentation**: [AWS DMS User Guide](https://docs.aws.amazon.com/dms/)

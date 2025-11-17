@@ -403,6 +403,14 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## Support
 
+### Authors & Support Contacts
+
+- **Mike Revitt** - [revittmk@amazon.com](mailto:revittmk@amazon.com)
+- **Hardik Panchal** - [hkvp@amazon.com](mailto:hkvp@amazon.com)
+- **Wei Chen** - [wchemz@amazon.com](mailto:wchemz@amazon.com)
+
+### Resources
+
 - [AWS DMS Documentation](https://docs.aws.amazon.com/dms/)
 - [AWS DMS Troubleshooting Guide](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html)
 - [GitHub Issues](https://github.com/awslabs/mcp/issues)
