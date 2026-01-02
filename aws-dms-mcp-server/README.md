@@ -30,7 +30,14 @@ A Model Context Protocol (MCP) server providing natural language access to AWS D
 
 ## Quick Start
 
-### 1. Configure AWS Credentials
+### 1. Install from Source
+
+```bash
+cd aws-dms-mcp-server
+pip install -e .
+```
+
+### 2. Configure AWS Credentials
 
 ```bash
 export AWS_REGION=us-east-1
@@ -38,7 +45,7 @@ export AWS_ACCESS_KEY_ID=your-access-key
 export AWS_SECRET_ACCESS_KEY=your-secret-key
 ```
 
-### 2. Use with MCP Client
+### 3. Use with MCP Client
 
 Add to your MCP client configuration:
 
@@ -46,10 +53,12 @@ Add to your MCP client configuration:
 {
   "mcpServers": {
     "awslabs.aws-dms-mcp-server": {
-      "command": "uvx",
+      "command": "python",
       "args": [
-        "awslabs.aws-dms-mcp-server@latest"
+        "-m",
+        "awslabs.aws_dms_mcp_server.server"
       ],
+      "cwd": "/path/to/aws-dms-mcp-server",
       "env": {
         "AWS_REGION": "us-east-1",
         "DMS_READ_ONLY_MODE": "false",

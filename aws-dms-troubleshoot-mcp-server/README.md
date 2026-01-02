@@ -52,22 +52,10 @@ The AWS DMS Troubleshooting MCP Server is designed to assist with post-migration
 
 ## Installation
 
-### Using uvx (Recommended)
-
-```bash
-uvx awslabs.aws-dms-troubleshoot-mcp-server
-```
-
-### Using pip
-
-```bash
-pip install awslabs.aws-dms-troubleshoot-mcp-server
-```
-
 ### From Source
 
 ```bash
-cd src/aws-dms-troubleshoot-mcp-server
+cd aws-dms-troubleshoot-mcp-server
 pip install -e .
 ```
 
@@ -101,8 +89,12 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 {
   "mcpServers": {
     "aws-dms-troubleshoot": {
-      "command": "uvx",
-      "args": ["awslabs.aws-dms-troubleshoot-mcp-server"],
+      "command": "python",
+      "args": [
+        "-m",
+        "awslabs.aws_dms_troubleshoot_mcp_server.server"
+      ],
+      "cwd": "/path/to/aws-dms-troubleshoot-mcp-server",
       "env": {
         "AWS_REGION": "us-east-1",
         "AWS_PROFILE": "default"
