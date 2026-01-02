@@ -1,10 +1,12 @@
 {
   "mcpServers": {
     "awslabs.aws-dms-mcp-server": {
+      "command": "python",
       "args": [
-        "awslabs.aws-dms-mcp-server@latest"
+        "-m",
+        "awslabs.aws_dms_mcp_server.server"
       ],
-      "command": "uvx",
+      "cwd": "/path/to/aws-dms-mcp-server",
       "env": {
         "AWS_REGION": "us-east-1",
         "DMS_LOG_LEVEL": "INFO",
