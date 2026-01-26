@@ -15,22 +15,33 @@
 """AWS DMS Troubleshooting MCP Server implementation."""
 
 import boto3
+import httpx
 import json
 import os
 import sys
+import uuid
 from awslabs.aws_dms_troubleshoot_mcp_server import __version__
 from botocore.config import Config
 from datetime import datetime, timedelta, timezone
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 # User agent configuration for AWS API calls
 USER_AGENT_CONFIG = Config(
     user_agent_extra=f'awslabs/mcp/aws-dms-troubleshoot-mcp-server/{__version__}'
 )
+
+# AWS Documentation Search API configuration
+AWS_DOCS_SEARCH_URL = 'https://proxy.search.docs.aws.com/search'
+AWS_DOCS_USER_AGENT = f'awslabs/mcp/aws-dms-troubleshoot-mcp-server/{__version__}'
+DOCS_SESSION_UUID = str(uuid.uuid4())
+
+# Cache of boto3 clients keyed by (service, region, profile) to avoid
+# recreating sessions and clients on every tool invocation.
+_CLIENT_CACHE: Dict = {}
 
 # Set up AWS region from environment variables
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
@@ -103,22 +114,110 @@ FIELD_AWS_PROFILE = Field(
 )
 
 
+def _get_client(service: str, region: str, profile: str = 'default'):
+    """Get a cached boto3 client for the given service, region, and profile.
+
+    Clients are cached per (service, region, profile) to avoid recreating a new
+    session and client on every tool invocation. boto3 clients are thread-safe,
+    so reuse is safe across concurrent calls.
+    """
+    cache_key = (service, region, profile)
+    client = _CLIENT_CACHE.get(cache_key)
+    if client is None:
+        session = boto3.Session(profile_name=profile, region_name=region)
+        client = session.client(service, config=USER_AGENT_CONFIG)
+        _CLIENT_CACHE[cache_key] = client
+    return client
+
+
 def get_dms_client(region: str, profile: str = 'default'):
     """Get DMS client with proper configuration."""
-    session = boto3.Session(profile_name=profile, region_name=region)
-    return session.client('dms', config=USER_AGENT_CONFIG)
+    return _get_client('dms', region, profile)
 
 
 def get_logs_client(region: str, profile: str = 'default'):
     """Get CloudWatch Logs client with proper configuration."""
-    session = boto3.Session(profile_name=profile, region_name=region)
-    return session.client('logs', config=USER_AGENT_CONFIG)
+    return _get_client('logs', region, profile)
 
 
 def get_ec2_client(region: str, profile: str = 'default'):
     """Get EC2 client with proper configuration."""
-    session = boto3.Session(profile_name=profile, region_name=region)
-    return session.client('ec2', config=USER_AGENT_CONFIG)
+    return _get_client('ec2', region, profile)
+
+
+async def search_aws_docs(search_phrase: str, limit: int = 5) -> List[Dict]:
+    """Search AWS documentation for DMS-related content.
+
+    Uses the public AWS Documentation Search API to find relevant
+    troubleshooting documentation based on an error pattern or topic.
+
+    Args:
+        search_phrase: The search query (will be scoped to DMS context)
+        limit: Maximum number of results to return
+
+    Returns:
+        List of search results with url, title, and context
+    """
+    request_body = {
+        'textQuery': {
+            'input': f'AWS DMS {search_phrase}',
+        },
+        'contextAttributes': [
+            {'key': 'domain', 'value': 'docs.aws.amazon.com'},
+            {'key': 'aws-docs-search-product', 'value': 'AWS Database Migration Service'},
+        ],
+        'acceptSuggestionBody': 'RawText',
+        'locales': ['en_us'],
+    }
+
+    search_url = f'{AWS_DOCS_SEARCH_URL}?session={DOCS_SESSION_UUID}'
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                search_url,
+                json=request_body,
+                headers={
+                    'Content-Type': 'application/json',
+                    'User-Agent': AWS_DOCS_USER_AGENT,
+                },
+                timeout=10,
+            )
+
+            if response.status_code >= 400:
+                logger.warning(f'AWS docs search returned status {response.status_code}')
+                return []
+
+            data = response.json()
+
+    except (httpx.HTTPError, Exception) as e:
+        logger.warning(f'AWS docs search failed: {str(e)}')
+        return []
+
+    results = []
+    if 'suggestions' in data:
+        for suggestion in data['suggestions'][:limit]:
+            if 'textExcerptSuggestion' not in suggestion:
+                continue
+
+            text_suggestion = suggestion['textExcerptSuggestion']
+            metadata = text_suggestion.get('metadata', {})
+
+            context = (
+                metadata.get('seo_abstract')
+                or text_suggestion.get('summary')
+                or text_suggestion.get('suggestionBody')
+            )
+
+            results.append(
+                {
+                    'url': text_suggestion.get('link', ''),
+                    'title': text_suggestion.get('title', ''),
+                    'context': context,
+                }
+            )
+
+    return results
 
 
 @mcp.tool()
@@ -150,50 +249,52 @@ async def list_replication_tasks(
         if status_filter:
             filters.append({'Name': 'replication-task-status', 'Values': [status_filter]})
 
-        # Get replication tasks
-        response = dms.describe_replication_tasks(
-            Filters=filters if filters else [], MaxRecords=100
-        )
+        # Get all replication tasks, paginating through results so callers with
+        # more than one page of tasks get a complete list rather than a silent
+        # truncation at 100 records.
+        paginator = dms.get_paginator('describe_replication_tasks')
+        page_iterator = paginator.paginate(Filters=filters if filters else [])
 
         tasks = []
         status_counts = {}
 
-        for task in response.get('ReplicationTasks', []):
-            status = task.get('Status', 'unknown')
-            status_counts[status] = status_counts.get(status, 0) + 1
+        for page in page_iterator:
+            for task in page.get('ReplicationTasks', []):
+                status = task.get('Status', 'unknown')
+                status_counts[status] = status_counts.get(status, 0) + 1
 
-            task_info = {
-                'task_arn': task.get('ReplicationTaskArn'),
-                'task_identifier': task.get('ReplicationTaskIdentifier'),
-                'status': status,
-                'migration_type': task.get('MigrationType'),
-                'source_endpoint_arn': task.get('SourceEndpointArn'),
-                'target_endpoint_arn': task.get('TargetEndpointArn'),
-                'replication_instance_arn': task.get('ReplicationInstanceArn'),
-                'table_mappings_count': len(
-                    json.loads(task.get('TableMappings', '{}')).get('rules', [])
-                ),
-            }
-
-            # Add statistics if available
-            if 'ReplicationTaskStats' in task:
-                stats = task['ReplicationTaskStats']
-                task_info['stats'] = {
-                    'full_load_progress': stats.get('FullLoadProgressPercent', 0),
-                    'tables_loaded': stats.get('TablesLoaded', 0),
-                    'tables_loading': stats.get('TablesLoading', 0),
-                    'tables_queued': stats.get('TablesQueued', 0),
-                    'tables_errored': stats.get('TablesErrored', 0),
+                task_info = {
+                    'task_arn': task.get('ReplicationTaskArn'),
+                    'task_identifier': task.get('ReplicationTaskIdentifier'),
+                    'status': status,
+                    'migration_type': task.get('MigrationType'),
+                    'source_endpoint_arn': task.get('SourceEndpointArn'),
+                    'target_endpoint_arn': task.get('TargetEndpointArn'),
+                    'replication_instance_arn': task.get('ReplicationInstanceArn'),
+                    'table_mappings_count': len(
+                        json.loads(task.get('TableMappings', '{}')).get('rules', [])
+                    ),
                 }
 
-            # Add error information if present
-            if task.get('LastFailureMessage'):
-                task_info['last_error'] = task.get('LastFailureMessage')
+                # Add statistics if available
+                if 'ReplicationTaskStats' in task:
+                    stats = task['ReplicationTaskStats']
+                    task_info['stats'] = {
+                        'full_load_progress': stats.get('FullLoadProgressPercent', 0),
+                        'tables_loaded': stats.get('TablesLoaded', 0),
+                        'tables_loading': stats.get('TablesLoading', 0),
+                        'tables_queued': stats.get('TablesQueued', 0),
+                        'tables_errored': stats.get('TablesErrored', 0),
+                    }
 
-            if task.get('StopReason'):
-                task_info['stop_reason'] = task.get('StopReason')
+                # Add error information if present
+                if task.get('LastFailureMessage'):
+                    task_info['last_error'] = task.get('LastFailureMessage')
 
-            tasks.append(task_info)
+                if task.get('StopReason'):
+                    task_info['stop_reason'] = task.get('StopReason')
+
+                tasks.append(task_info)
 
         return {
             'region': region,
@@ -461,11 +562,20 @@ async def analyze_endpoint(
     endpoint_arn: str = Field(description='Endpoint ARN to analyze'),
     region: str = FIELD_AWS_REGION,
     aws_profile: str = FIELD_AWS_PROFILE,
+    replication_instance_arn: Optional[str] = Field(
+        None,
+        description='Optional replication instance ARN. When provided, a live connection test is run between this instance and the endpoint.',
+    ),
 ) -> Dict:
     """Analyze a DMS endpoint configuration for potential issues.
 
     This tool examines source or target endpoint configuration and checks for
     common misconfigurations that can cause replication issues.
+
+    If a replication_instance_arn is provided, a live connection test is run
+    between that instance and the endpoint. The DMS DescribeEndpoints API does
+    not return an associated replication instance, so the test is skipped unless
+    the instance ARN is supplied explicitly.
 
     Returns:
         Dictionary containing:
@@ -552,20 +662,31 @@ async def analyze_endpoint(
                     'Ensure PostgreSQL logical replication is properly configured (wal_level=logical)'
                 )
 
-        # Test connection if possible
-        try:
-            test_response = dms.test_connection(
-                ReplicationInstanceArn=endpoint.get('ReplicationInstanceArn', ''),
-                EndpointArn=endpoint_arn,
-            )
+        # Test connection if a replication instance ARN was provided. The
+        # DescribeEndpoints response does not include an associated replication
+        # instance, so without an explicit ARN there is nothing valid to test
+        # against and we skip the call rather than guaranteeing a failure.
+        if replication_instance_arn:
+            try:
+                test_response = dms.test_connection(
+                    ReplicationInstanceArn=replication_instance_arn,
+                    EndpointArn=endpoint_arn,
+                )
+                connection_test = {
+                    'status': test_response.get('Connection', {}).get('Status'),
+                    'message': test_response.get('Connection', {}).get(
+                        'LastFailureMessage', 'N/A'
+                    ),
+                }
+            except Exception as test_error:
+                connection_test = {
+                    'status': 'unable_to_test',
+                    'error': str(test_error),
+                }
+        else:
             connection_test = {
-                'status': test_response.get('Connection', {}).get('Status'),
-                'message': test_response.get('Connection', {}).get('LastFailureMessage', 'N/A'),
-            }
-        except Exception as test_error:
-            connection_test = {
-                'status': 'unable_to_test',
-                'error': str(test_error),
+                'status': 'skipped',
+                'message': 'Provide replication_instance_arn to run a live connection test',
             }
 
         return {
@@ -625,12 +746,21 @@ async def diagnose_replication_issue(
             max_events=50,
         )
 
-        # Analyze endpoints
+        # Analyze endpoints. The task's replication instance ARN is passed
+        # through so analyze_endpoint can run a live connection test for each
+        # endpoint as part of the diagnosis.
+        replication_instance_arn = task_details.get('replication_instance_arn')
         source_analysis = await analyze_endpoint(
-            task_details['source_endpoint_arn'], region, aws_profile
+            task_details['source_endpoint_arn'],
+            region,
+            aws_profile,
+            replication_instance_arn,
         )
         target_analysis = await analyze_endpoint(
-            task_details['target_endpoint_arn'], region, aws_profile
+            task_details['target_endpoint_arn'],
+            region,
+            aws_profile,
+            replication_instance_arn,
         )
 
         # Build diagnosis
@@ -736,14 +866,16 @@ async def get_troubleshooting_recommendations(
 ) -> Dict:
     """Get troubleshooting recommendations based on common DMS error patterns.
 
-    This tool provides recommendations and links to AWS documentation based on
-    common DMS error patterns and issues.
+    This tool provides recommendations based on common DMS error patterns and
+    searches the official AWS documentation for relevant troubleshooting content.
+    It combines curated quick-fix guidance with live documentation results.
 
     Returns:
         Dictionary containing:
         - matched_patterns: Error patterns that were matched
         - recommendations: Step-by-step troubleshooting guide
-        - documentation_links: Relevant AWS documentation
+        - documentation_links: Relevant AWS documentation (static)
+        - aws_docs_results: Live search results from AWS documentation
     """
     try:
         logger.info(f'Finding recommendations for error pattern: {error_pattern}')
@@ -880,13 +1012,18 @@ async def get_troubleshooting_recommendations(
         doc_links.append('https://docs.aws.amazon.com/dms/latest/userguide/Welcome.html')
         doc_links.append('https://repost.aws/knowledge-center/dms-common-errors')
 
+        # Search AWS documentation for live results related to the error pattern
+        aws_docs_results = await search_aws_docs(error_pattern, limit=5)
+
         return {
             'query': error_pattern,
             'matched_patterns': matched_patterns,
             'recommendations': recommendations,
             'documentation_links': doc_links,
+            'aws_docs_results': aws_docs_results,
             'next_steps': [
-                'Apply relevant recommendations from above',
+                'Review the AWS documentation results above for detailed guidance',
+                'Apply relevant recommendations from the matched patterns',
                 'Check CloudWatch Logs for detailed error context',
                 'Test changes incrementally',
                 'Document findings for future reference',

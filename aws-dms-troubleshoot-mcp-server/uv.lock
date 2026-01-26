@@ -45,11 +45,12 @@ wheels = [
 ]
 
 [[package]]
-name = "awslabs-aws-dms-troubleshoot-mcp-server"
-version = "0.0.0"
+name = "aws-dms-troubleshoot-mcp"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
+    { name = "httpx" },
     { name = "loguru" },
     { name = "mcp", extra = ["cli"] },
     { name = "pydantic" },
@@ -71,6 +72,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.38.11" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.6.0" },
     { name = "pydantic", specifier = ">=2.10.6" },

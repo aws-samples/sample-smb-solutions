@@ -17,7 +17,7 @@
 import json
 import pytest
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 @pytest.fixture
@@ -25,6 +25,18 @@ def mock_dms_client():
     """Mock DMS client for testing."""
     client = MagicMock()
     return client
+
+
+def _set_replication_tasks(mock_dms, tasks):
+    """Configure a mocked DMS client's paginator to yield the given tasks.
+
+    list_replication_tasks uses dms.get_paginator('describe_replication_tasks'),
+    so tests must configure the paginator rather than the direct API call.
+    """
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{'ReplicationTasks': tasks}]
+    mock_dms.get_paginator.return_value = paginator
+    return paginator
 
 
 @pytest.fixture
@@ -77,9 +89,7 @@ async def test_list_replication_tasks(mock_dms_client, sample_replication_task):
     """Test listing replication tasks."""
     from awslabs.aws_dms_troubleshoot_mcp_server.server import list_replication_tasks
 
-    mock_dms_client.describe_replication_tasks.return_value = {
-        'ReplicationTasks': [sample_replication_task]
-    }
+    _set_replication_tasks(mock_dms_client, [sample_replication_task])
 
     with patch(
         'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
@@ -98,9 +108,7 @@ async def test_list_replication_tasks_with_filter(mock_dms_client, sample_replic
     """Test listing replication tasks with status filter."""
     from awslabs.aws_dms_troubleshoot_mcp_server.server import list_replication_tasks
 
-    mock_dms_client.describe_replication_tasks.return_value = {
-        'ReplicationTasks': [sample_replication_task]
-    }
+    paginator = _set_replication_tasks(mock_dms_client, [sample_replication_task])
 
     with patch(
         'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
@@ -109,10 +117,39 @@ async def test_list_replication_tasks_with_filter(mock_dms_client, sample_replic
         result = await list_replication_tasks(region='us-east-1', status_filter='running')
 
         assert result['total_tasks'] == 1
-        mock_dms_client.describe_replication_tasks.assert_called_once()
-        call_args = mock_dms_client.describe_replication_tasks.call_args[1]
+        paginator.paginate.assert_called_once()
+        call_args = paginator.paginate.call_args[1]
         assert len(call_args['Filters']) == 1
         assert call_args['Filters'][0]['Name'] == 'replication-task-status'
+
+
+@pytest.mark.asyncio
+async def test_list_replication_tasks_paginates(mock_dms_client, sample_replication_task):
+    """Test that list_replication_tasks aggregates across multiple pages."""
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import list_replication_tasks
+
+    second_task = dict(sample_replication_task)
+    second_task['ReplicationTaskIdentifier'] = 'test-task-2'
+    second_task['Status'] = 'stopped'
+
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {'ReplicationTasks': [sample_replication_task]},
+        {'ReplicationTasks': [second_task]},
+    ]
+    mock_dms_client.get_paginator.return_value = paginator
+
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
+        return_value=mock_dms_client,
+    ):
+        result = await list_replication_tasks(region='us-east-1')
+
+        assert result['total_tasks'] == 2
+        assert result['status_summary']['running'] == 1
+        assert result['status_summary']['stopped'] == 1
+        identifiers = {t['task_identifier'] for t in result['tasks']}
+        assert identifiers == {'test-task-1', 'test-task-2'}
 
 
 @pytest.mark.asyncio
@@ -264,12 +301,25 @@ async def test_get_troubleshooting_recommendations_connection():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='connection timeout')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                'url': 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html',
+                'title': 'Troubleshooting DMS',
+                'context': 'Network connectivity issues',
+            }
+        ],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='connection timeout')
 
-    assert 'Connection/Network Issues' in result['matched_patterns']
-    assert len(result['recommendations']) > 0
-    assert len(result['documentation_links']) > 0
-    assert any('security group' in rec.lower() for rec in result['recommendations'])
+        assert 'Connection/Network Issues' in result['matched_patterns']
+        assert len(result['recommendations']) > 0
+        assert len(result['documentation_links']) > 0
+        assert any('security group' in rec.lower() for rec in result['recommendations'])
+        assert 'aws_docs_results' in result
+        assert len(result['aws_docs_results']) > 0
 
 
 @pytest.mark.asyncio
@@ -279,13 +329,18 @@ async def test_get_troubleshooting_recommendations_auth():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='access denied')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='access denied')
 
-    assert 'Authentication/Authorization Issues' in result['matched_patterns']
-    assert any(
-        'credential' in rec.lower() or 'permission' in rec.lower()
-        for rec in result['recommendations']
-    )
+        assert 'Authentication/Authorization Issues' in result['matched_patterns']
+        assert any(
+            'credential' in rec.lower() or 'permission' in rec.lower()
+            for rec in result['recommendations']
+        )
 
 
 @pytest.mark.asyncio
@@ -295,12 +350,17 @@ async def test_get_troubleshooting_recommendations_cdc():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='binlog error')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='binlog error')
 
-    assert 'CDC/Replication Issues' in result['matched_patterns']
-    assert any(
-        'binlog' in rec.lower() or 'cdc' in rec.lower() for rec in result['recommendations']
-    )
+        assert 'CDC/Replication Issues' in result['matched_patterns']
+        assert any(
+            'binlog' in rec.lower() or 'cdc' in rec.lower() for rec in result['recommendations']
+        )
 
 
 @pytest.mark.asyncio
@@ -636,10 +696,15 @@ async def test_get_troubleshooting_recommendations_table_issues():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='table constraint error')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='table constraint error')
 
-    assert 'Table/Schema Issues' in result['matched_patterns']
-    assert any('table mapping' in rec.lower() for rec in result['recommendations'])
+        assert 'Table/Schema Issues' in result['matched_patterns']
+        assert any('table mapping' in rec.lower() for rec in result['recommendations'])
 
 
 @pytest.mark.asyncio
@@ -649,10 +714,15 @@ async def test_get_troubleshooting_recommendations_performance():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='slow replication')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='slow replication')
 
-    assert 'Performance Issues' in result['matched_patterns']
-    assert any('instance size' in rec.lower() for rec in result['recommendations'])
+        assert 'Performance Issues' in result['matched_patterns']
+        assert any('instance size' in rec.lower() for rec in result['recommendations'])
 
 
 @pytest.mark.asyncio
@@ -662,10 +732,15 @@ async def test_get_troubleshooting_recommendations_ssl():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='ssl certificate error')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='ssl certificate error')
 
-    assert 'SSL/TLS Issues' in result['matched_patterns']
-    assert any('certificate' in rec.lower() for rec in result['recommendations'])
+        assert 'SSL/TLS Issues' in result['matched_patterns']
+        assert any('certificate' in rec.lower() for rec in result['recommendations'])
 
 
 @pytest.mark.asyncio
@@ -675,10 +750,15 @@ async def test_get_troubleshooting_recommendations_generic():
         get_troubleshooting_recommendations,
     )
 
-    result = await get_troubleshooting_recommendations(error_pattern='unknown error xyz')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='unknown error xyz')
 
-    assert 'General Troubleshooting' in result['matched_patterns']
-    assert len(result['documentation_links']) > 0
+        assert 'General Troubleshooting' in result['matched_patterns']
+        assert len(result['documentation_links']) > 0
 
 
 @pytest.mark.asyncio
@@ -911,7 +991,9 @@ async def test_list_replication_tasks_error():
     from unittest.mock import MagicMock
 
     mock_dms = MagicMock()
-    mock_dms.describe_replication_tasks.side_effect = Exception('AWS API Error')
+    paginator = MagicMock()
+    paginator.paginate.side_effect = Exception('AWS API Error')
+    mock_dms.get_paginator.return_value = paginator
 
     with patch(
         'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
@@ -992,11 +1074,17 @@ async def test_get_troubleshooting_recommendations_error():
     )
 
     # This function shouldn't normally error, but let's test with edge case
-    result = await get_troubleshooting_recommendations(error_pattern='')
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.search_aws_docs',
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        result = await get_troubleshooting_recommendations(error_pattern='')
 
-    # Should return generic recommendations for empty pattern
-    assert 'matched_patterns' in result
-    assert len(result['documentation_links']) > 0
+        # Should return generic recommendations for empty pattern
+        assert 'matched_patterns' in result
+        assert len(result['documentation_links']) > 0
+        assert 'aws_docs_results' in result
 
 
 @pytest.mark.asyncio
@@ -1504,9 +1592,7 @@ async def test_list_replication_tasks_with_error_fields(sample_replication_task)
     mock_dms = MagicMock()
     sample_replication_task['LastFailureMessage'] = 'Connection timeout'
     sample_replication_task['StopReason'] = 'User stopped'
-    mock_dms.describe_replication_tasks.return_value = {
-        'ReplicationTasks': [sample_replication_task]
-    }
+    _set_replication_tasks(mock_dms, [sample_replication_task])
 
     with patch(
         'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
@@ -1714,10 +1800,65 @@ async def test_analyze_endpoint_test_connection_error(sample_endpoint):
         return_value=mock_dms,
     ):
         result = await analyze_endpoint(
-            endpoint_arn='arn:aws:dms:us-east-1:123456789012:endpoint:test', region='us-east-1'
+            endpoint_arn='arn:aws:dms:us-east-1:123456789012:endpoint:test',
+            region='us-east-1',
+            replication_instance_arn='arn:aws:dms:us-east-1:123456789012:rep:test',
         )
 
         assert result['connection_test']['status'] == 'unable_to_test'
+
+
+@pytest.mark.asyncio
+async def test_analyze_endpoint_connection_test_skipped(sample_endpoint):
+    """Test that the connection test is skipped without a replication instance ARN."""
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import analyze_endpoint
+    from unittest.mock import MagicMock
+
+    mock_dms = MagicMock()
+    mock_dms.describe_endpoints.return_value = {'Endpoints': [sample_endpoint]}
+
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
+        return_value=mock_dms,
+    ):
+        result = await analyze_endpoint(
+            endpoint_arn='arn:aws:dms:us-east-1:123456789012:endpoint:test',
+            region='us-east-1',
+            replication_instance_arn=None,
+        )
+
+        assert result['connection_test']['status'] == 'skipped'
+        mock_dms.test_connection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_endpoint_connection_test_runs_with_instance(sample_endpoint):
+    """Test that a connection test runs when a replication instance ARN is given."""
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import analyze_endpoint
+    from unittest.mock import MagicMock
+
+    mock_dms = MagicMock()
+    mock_dms.describe_endpoints.return_value = {'Endpoints': [sample_endpoint]}
+    mock_dms.test_connection.return_value = {
+        'Connection': {'Status': 'successful', 'LastFailureMessage': ''}
+    }
+
+    with patch(
+        'awslabs.aws_dms_troubleshoot_mcp_server.server.get_dms_client',
+        return_value=mock_dms,
+    ):
+        result = await analyze_endpoint(
+            endpoint_arn='arn:aws:dms:us-east-1:123456789012:endpoint:test',
+            region='us-east-1',
+            replication_instance_arn='arn:aws:dms:us-east-1:123456789012:rep:test',
+        )
+
+        assert result['connection_test']['status'] == 'successful'
+        mock_dms.test_connection.assert_called_once()
+        call_kwargs = mock_dms.test_connection.call_args[1]
+        assert (
+            call_kwargs['ReplicationInstanceArn'] == 'arn:aws:dms:us-east-1:123456789012:rep:test'
+        )
 
 
 @pytest.mark.asyncio
@@ -2048,3 +2189,152 @@ def test_main_function():
     with patch('awslabs.aws_dms_troubleshoot_mcp_server.server.mcp', mock_mcp):
         main()
         mock_mcp.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_search_aws_docs_success():
+    """Test search_aws_docs returns results from AWS documentation API."""
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import search_aws_docs
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        'suggestions': [
+            {
+                'textExcerptSuggestion': {
+                    'link': 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html',
+                    'title': 'Troubleshooting migration tasks in AWS DMS',
+                    'summary': 'This section describes common issues and solutions.',
+                    'metadata': {
+                        'seo_abstract': 'Troubleshoot common DMS migration task issues.',
+                    },
+                }
+            },
+            {
+                'textExcerptSuggestion': {
+                    'link': 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_BestPractices.html',
+                    'title': 'Best practices for AWS DMS',
+                    'summary': 'Best practices for using AWS DMS.',
+                    'metadata': {},
+                }
+            },
+        ]
+    }
+
+    with patch('httpx.AsyncClient') as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        results = await search_aws_docs('connection timeout', limit=5)
+
+        assert len(results) == 2
+        assert (
+            results[0]['url']
+            == 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html'
+        )
+        assert results[0]['title'] == 'Troubleshooting migration tasks in AWS DMS'
+        assert results[0]['context'] == 'Troubleshoot common DMS migration task issues.'
+        assert results[1]['context'] == 'Best practices for using AWS DMS.'
+
+
+@pytest.mark.asyncio
+async def test_search_aws_docs_http_error():
+    """Test search_aws_docs handles HTTP errors gracefully."""
+    import httpx
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import search_aws_docs
+
+    with patch('httpx.AsyncClient') as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = httpx.HTTPError('Connection failed')
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        results = await search_aws_docs('connection timeout')
+
+        assert results == []
+
+
+@pytest.mark.asyncio
+async def test_search_aws_docs_api_error_status():
+    """Test search_aws_docs handles non-200 status codes gracefully."""
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import search_aws_docs
+
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+
+    with patch('httpx.AsyncClient') as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        results = await search_aws_docs('connection timeout')
+
+        assert results == []
+
+
+@pytest.mark.asyncio
+async def test_search_aws_docs_empty_results():
+    """Test search_aws_docs handles empty response."""
+    from awslabs.aws_dms_troubleshoot_mcp_server.server import search_aws_docs
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {'suggestions': []}
+
+    with patch('httpx.AsyncClient') as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        results = await search_aws_docs('some obscure query')
+
+        assert results == []
+
+
+def test_client_cache_reuses_clients():
+    """Test that boto3 clients are cached per (service, region, profile)."""
+    import awslabs.aws_dms_troubleshoot_mcp_server.server as server
+
+    # Clear any cached clients from earlier tests
+    server._CLIENT_CACHE.clear()
+
+    fake_client = MagicMock()
+    fake_session = MagicMock()
+    fake_session.client.return_value = fake_client
+
+    with patch.object(server.boto3, 'Session', return_value=fake_session) as mock_session:
+        first = server.get_dms_client('us-east-1', 'default')
+        second = server.get_dms_client('us-east-1', 'default')
+
+        assert first is second
+        # Session/client should only be constructed once for the same key
+        mock_session.assert_called_once()
+        fake_session.client.assert_called_once()
+
+
+def test_client_cache_separate_keys():
+    """Test that different regions or services get distinct cached clients."""
+    import awslabs.aws_dms_troubleshoot_mcp_server.server as server
+
+    server._CLIENT_CACHE.clear()
+
+    fake_session = MagicMock()
+    # Each .client() call returns a fresh mock
+    fake_session.client.side_effect = lambda *args, **kwargs: MagicMock()
+
+    with patch.object(server.boto3, 'Session', return_value=fake_session):
+        dms_east = server.get_dms_client('us-east-1', 'default')
+        dms_west = server.get_dms_client('us-west-2', 'default')
+        ec2_east = server.get_ec2_client('us-east-1', 'default')
+
+        assert dms_east is not dms_west
+        assert dms_east is not ec2_east
+        assert len(server._CLIENT_CACHE) == 3

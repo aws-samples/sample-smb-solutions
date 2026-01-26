@@ -52,11 +52,31 @@ The AWS DMS Troubleshooting MCP Server is designed to assist with post-migration
 
 ## Installation
 
+### Using uv (recommended)
+
+The package is published on [PyPI](https://pypi.org/project/aws-dms-troubleshoot-mcp/). The
+simplest way to run it is with [`uvx`](https://docs.astral.sh/uv/), which downloads and runs the
+server without a manual install:
+
+```bash
+uvx aws-dms-troubleshoot-mcp@latest
+```
+
+Alternatively, install it into your environment with `uv` or `pip`:
+
+```bash
+uv pip install aws-dms-troubleshoot-mcp
+# or
+pip install aws-dms-troubleshoot-mcp
+```
+
+Both expose the `aws-dms-troubleshoot-mcp` console command.
+
 ### From Source
 
 ```bash
 cd aws-dms-troubleshoot-mcp-server
-pip install -e .
+uv sync
 ```
 
 ## Configuration
@@ -83,26 +103,52 @@ The server uses standard AWS credential chain:
 
 ### MCP Client Configuration
 
-Add to your MCP client configuration (e.g., Claude Desktop):
+Add to your MCP client configuration (e.g., Claude Desktop, Kiro). The recommended setup uses
+`uvx` to run the published package directly:
 
 ```json
 {
   "mcpServers": {
     "aws-dms-troubleshoot": {
-      "command": "python",
-      "args": [
-        "-m",
-        "awslabs.aws_dms_troubleshoot_mcp_server.server"
-      ],
-      "cwd": "/path/to/aws-dms-troubleshoot-mcp-server",
+      "command": "uvx",
+      "args": ["aws-dms-troubleshoot-mcp@latest"],
       "env": {
         "AWS_REGION": "us-east-1",
-        "AWS_PROFILE": "default"
+        "AWS_PROFILE": "default",
+        "FASTMCP_LOG_LEVEL": "INFO"
       }
     }
   }
 }
 ```
+
+To run from a local clone instead (useful for development), point `uv` at the project directory:
+
+```json
+{
+  "mcpServers": {
+    "aws-dms-troubleshoot": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/aws-dms-troubleshoot-mcp-server",
+        "run",
+        "aws-dms-troubleshoot-mcp"
+      ],
+      "env": {
+        "AWS_REGION": "us-east-1",
+        "AWS_PROFILE": "default",
+        "FASTMCP_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
+```
+
+> **Note on `AWS_PROFILE`:** If your environment authenticates with environment-variable
+> credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) or an IAM role rather than a named
+> profile in `~/.aws/credentials`, omit `AWS_PROFILE` so the default credential chain is used.
+> Setting it to `default` when no such profile exists will cause boto3 to fail.
 
 ## AWS Permissions Required
 
@@ -405,7 +451,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 - [AWS DMS Documentation](https://docs.aws.amazon.com/dms/)
 - [AWS DMS Troubleshooting Guide](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html)
-- [GitHub Issues](https://github.com/awslabs/mcp/issues)
+- [GitHub Issues](https://github.com/aws-samples/sample-smb-solutions/issues)
 - [AWS Support](https://aws.amazon.com/support/)
 
 ## Related Resources

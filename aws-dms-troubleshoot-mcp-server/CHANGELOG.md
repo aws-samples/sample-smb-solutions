@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-01
+
+### Changed
+- Published to PyPI as `aws-dms-troubleshoot-mcp`; documentation now uses `uvx` for installation and MCP client configuration
+- `get_troubleshooting_recommendations` now augments static guidance with live AWS documentation search results
+- `list_replication_tasks` paginates through all results instead of truncating at 100 tasks
+- boto3 clients are cached per region/profile to avoid recreating sessions on every call
+
+### Fixed
+- `analyze_endpoint` no longer issues a guaranteed-to-fail connection test; the test now runs only when a `replication_instance_arn` is supplied
+
 ## [1.0.0] - 2025-11-03
 
 ### Added
@@ -45,4 +56,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test coverage for error scenarios
 - Async test support
 
-[1.0.0]: https://github.com/awslabs/mcp/releases/tag/aws-dms-troubleshoot-mcp-server-v1.0.0
+[1.0.1]: https://pypi.org/project/aws-dms-troubleshoot-mcp/1.0.1/
+[1.0.0]: https://pypi.org/project/aws-dms-troubleshoot-mcp/1.0.0/
