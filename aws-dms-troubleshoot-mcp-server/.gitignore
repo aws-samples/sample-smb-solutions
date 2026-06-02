@@ -57,3 +57,6 @@ target/
 
 # PyPI
 .pypirc
+
+# macOS
+.DS_Store
