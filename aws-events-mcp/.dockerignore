@@ -1,0 +1,25 @@
+# Local virtual environments (rebuilt inside the image by `uv sync`)
+.venv/
+**/.venv/
+
+# Python caches and build artifacts
+**/__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# VCS and editor metadata
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# CI / scratch
+.github/
