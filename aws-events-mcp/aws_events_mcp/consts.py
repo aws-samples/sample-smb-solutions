@@ -72,6 +72,8 @@ ENV_CATALOG_ENDPOINT_URL = 'AWS_EVENTS_CATALOG_ENDPOINT_URL'
 ENV_CATALOG_DIRECTORY_ID = 'AWS_EVENTS_CATALOG_DIRECTORY_ID'
 #: Override (JSON object string) for the upstream query parameters.
 ENV_CATALOG_QUERY_PARAMS = 'AWS_EVENTS_CATALOG_QUERY_PARAMS'
+#: Override (JSON array string) for the upstream ``tags.id`` exclusion filters.
+ENV_CATALOG_TAG_EXCLUSIONS = 'AWS_EVENTS_CATALOG_TAG_EXCLUSIONS'
 
 
 # --- Defaults ----------------------------------------------------------------
@@ -115,13 +117,29 @@ DEFAULT_CATALOG_ENDPOINT_URL = 'https://aws.amazon.com/api/dirs/items/search'
 #: Confirmed directory identifier: the alias aggregating the AWS Events
 #: sub-directories, sent as the ``item.directoryId`` query parameter.
 DEFAULT_CATALOG_DIRECTORY_ID = 'alias#events-webinars-interactive-cards'
-#: Confirmed base upstream query parameters. ``item.directoryId`` and ``page``
-#: are added per request by ``JsonApiCatalogSource``; ``size`` is capped at 100
-#: by the API and ``item.locale`` selects the English catalog.
+#: Confirmed base upstream query parameters, matching the live request issued by
+#: the public catalog page (task 8.2, re-verified via network inspection).
+#: ``item.directoryId`` and ``page`` are added per request by
+#: ``JsonApiCatalogSource``; ``size`` is capped at 100 by the API and
+#: ``item.locale`` selects the English catalog. ``sort_by``/``sort_order`` mirror
+#: the site's server-side ordering (newest first); the server re-orders results
+#: by start date for its own responses, so this only affects upstream paging.
 DEFAULT_CATALOG_QUERY_PARAMS: dict[str, str] = {
     'item.locale': 'en_US',
     'size': str(MAX_PAGE_SIZE),
+    'sort_by': 'item.dateCreated',
+    'sort_order': 'desc',
 }
+
+#: Confirmed ``tags.id`` exclusion filters the live catalog page sends on every
+#: request (each rendered as a repeated ``tags.id=!<tag>`` query parameter). They
+#: drop third-party series and archived items, matching what the website shows
+#: (~1,332 events) and avoiding stale/archived records that lack a start date.
+DEFAULT_CATALOG_TAG_EXCLUSIONS: tuple[str, ...] = (
+    '!GLOBAL#local-tags-events-master-series#third-party',
+    '!GLOBAL#local-tags-series#third-party',
+    '!GLOBAL#local-tags-flag#archived',
+)
 
 
 def _resolve_query_params() -> dict[str, str]:
@@ -144,9 +162,31 @@ def _resolve_query_params() -> dict[str, str]:
     return {str(key): str(value) for key, value in parsed.items()}
 
 
+def _resolve_tag_exclusions() -> tuple[str, ...]:
+    """Resolve the ``tags.id`` exclusion filters, honoring the env override.
+
+    Returns:
+        The default tag exclusions, or the parsed JSON array of strings supplied
+        via ``AWS_EVENTS_CATALOG_TAG_EXCLUSIONS`` when that variable holds a
+        valid JSON array. Invalid overrides fall back to the defaults.
+    """
+    raw = os.getenv(ENV_CATALOG_TAG_EXCLUSIONS)
+    if not raw:
+        return DEFAULT_CATALOG_TAG_EXCLUSIONS
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return DEFAULT_CATALOG_TAG_EXCLUSIONS
+    if not isinstance(parsed, list):
+        return DEFAULT_CATALOG_TAG_EXCLUSIONS
+    return tuple(str(value) for value in parsed)
+
+
 #: Effective content-directory endpoint URL (env override applied at import).
 CATALOG_ENDPOINT_URL = os.getenv(ENV_CATALOG_ENDPOINT_URL, DEFAULT_CATALOG_ENDPOINT_URL)
 #: Effective content-directory identifier (env override applied at import).
 CATALOG_DIRECTORY_ID = os.getenv(ENV_CATALOG_DIRECTORY_ID, DEFAULT_CATALOG_DIRECTORY_ID)
 #: Effective upstream query parameters (env override applied at import).
 CATALOG_QUERY_PARAMS = _resolve_query_params()
+#: Effective ``tags.id`` exclusion filters (env override applied at import).
+CATALOG_TAG_EXCLUSIONS = _resolve_tag_exclusions()

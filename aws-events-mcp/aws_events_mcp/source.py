@@ -106,7 +106,7 @@ class EventCatalogSource(Protocol):
 
 
 async def _request(
-    client: httpx.AsyncClient, url: str, params: Optional[dict[str, str]] = None
+    client: httpx.AsyncClient, url: str, params: Optional[dict[str, Any]] = None
 ) -> httpx.Response:
     """Issue a GET request and translate transport failures into typed errors.
 
@@ -328,6 +328,7 @@ class JsonApiCatalogSource:
         endpoint_url: str = consts.CATALOG_ENDPOINT_URL,
         directory_id: str = consts.CATALOG_DIRECTORY_ID,
         query_params: Optional[dict[str, str]] = None,
+        tag_exclusions: Optional[tuple[str, ...]] = None,
         timeout_seconds: float = consts.REQUEST_TIMEOUT_SECONDS,
         user_agent: str = consts.USER_AGENT,
     ) -> None:
@@ -339,6 +340,10 @@ class JsonApiCatalogSource:
                 catalog, sent as a query parameter.
             query_params: Base upstream query parameters; defaults to
                 ``consts.CATALOG_QUERY_PARAMS``.
+            tag_exclusions: ``tags.id`` exclusion filters sent as repeated
+                ``tags.id=!<tag>`` query parameters, matching the live catalog
+                page (drops third-party/archived records). Defaults to
+                ``consts.CATALOG_TAG_EXCLUSIONS``.
             timeout_seconds: Total request timeout in seconds (Requirement 11.2).
             user_agent: Descriptive ``User-Agent`` header value (NFR Security).
         """
@@ -347,29 +352,37 @@ class JsonApiCatalogSource:
         self._query_params = dict(
             query_params if query_params is not None else consts.CATALOG_QUERY_PARAMS
         )
+        self._tag_exclusions = tuple(
+            tag_exclusions if tag_exclusions is not None else consts.CATALOG_TAG_EXCLUSIONS
+        )
         self._timeout = httpx.Timeout(timeout_seconds)
         self._user_agent = user_agent
 
-    def _build_params(self, page: int) -> dict[str, str]:
+    def _build_params(self, page: int) -> dict[str, Any]:
         """Build the query parameters for a single upstream page request.
 
-        Adds the confirmed ``item.directoryId`` (the events alias) and the
-        zero-based ``page`` index to the configured base parameters (which carry
-        ``item.locale`` and ``size``). Parameter names were confirmed in task
-        8.2 against the live content-directory API.
+        Adds the confirmed ``item.directoryId`` (the events alias), the
+        zero-based ``page`` index, and the ``tags.id`` exclusion filters (as a
+        list value, which httpx serializes to repeated ``tags.id`` parameters)
+        to the configured base parameters (which carry ``item.locale``, ``size``,
+        and the ``sort_by``/``sort_order`` ordering). These match the live
+        request issued by the public catalog page (task 8.2, re-verified).
 
         Args:
             page: Zero-based page index.
 
         Returns:
-            The merged query parameters for the request.
+            The merged query parameters for the request. The ``tags.id`` value is
+            a list of exclusion filters when any are configured.
         """
-        params = dict(self._query_params)
+        params: dict[str, Any] = dict(self._query_params)
         params['item.directoryId'] = self._directory_id
         params['page'] = str(page)
+        if self._tag_exclusions:
+            params['tags.id'] = list(self._tag_exclusions)
         return params
 
-    async def _get_json(self, client: httpx.AsyncClient, params: dict[str, str]) -> Any:
+    async def _get_json(self, client: httpx.AsyncClient, params: dict[str, Any]) -> Any:
         """Request one upstream page and decode its JSON body.
 
         Args:

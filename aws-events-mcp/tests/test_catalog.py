@@ -32,9 +32,10 @@ The behaviors covered are:
   ``CatalogUnparseableError`` (Requirements 10.7, 11.3);
 - an empty-but-valid catalog returns an empty list and is not an error
   (Requirements 2.4, 10.7);
-- a partial parse raises ``CatalogPartialParseError`` after caching the valid
-  events, so a subsequent call within the TTL window returns them without a
-  refetch (Requirement 11.4).
+- a partial parse (some but not all records parsed) is a successful, degraded
+  result: ``get_events`` returns the successfully parsed events, caches them, and
+  does not raise, so a subsequent call within the TTL window returns them without
+  a refetch (Requirement 11.4).
 
 Validates: Requirements 2.4, 10.7, 11.3, 11.4.
 """
@@ -43,7 +44,7 @@ import asyncio
 import pytest
 from aws_events_mcp import catalog
 from aws_events_mcp.catalog import CatalogCache
-from aws_events_mcp.errors import CatalogPartialParseError, CatalogUnparseableError
+from aws_events_mcp.errors import CatalogUnparseableError
 from typing import Optional
 
 
@@ -259,20 +260,28 @@ async def test_empty_but_valid_returns_empty_list(monkeypatch: pytest.MonkeyPatc
     assert fake.calls == 1
 
 
-async def test_partial_parse_caches_then_signals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Partial parse raises after caching, so a later call reuses the valid events."""
+async def test_partial_parse_returns_parsed_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial parse returns and caches the valid events without raising (Req 11.4).
+
+    A partial parse (some but not all records parsed) is a successful, degraded
+    result, not an error: ``get_events`` returns the successfully parsed events
+    and caches them, so a subsequent call within the TTL window returns the same
+    events without a new upstream fetch (single-flight/caching preserved).
+    """
     _install_clock(monkeypatch, FakeClock())
     fake = FakeCatalogSource([_valid_record('good'), _invalid_record('bad')])
     cache = CatalogCache(fake, ttl_seconds=900)
 
-    # First call: one of two records parses -> partial-parse signal.
-    with pytest.raises(CatalogPartialParseError):
-        await cache.get_events()
-    assert fake.calls == 1
-
-    # The valid event was cached before the signal, so a subsequent call within
-    # the TTL window returns it without a new upstream fetch (Req 11.4).
+    # First call: one of two records parses -> the valid event is returned, not
+    # an error.
     events = await cache.get_events()
     assert fake.calls == 1
     assert len(events) == 1
     assert events[0].event_id == 'good'
+
+    # The valid event was cached, so a subsequent call within the TTL window
+    # returns it without a new upstream fetch (Req 11.4).
+    reused = await cache.get_events()
+    assert fake.calls == 1
+    assert len(reused) == 1
+    assert reused[0].event_id == 'good'

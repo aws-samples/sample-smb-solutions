@@ -43,26 +43,22 @@ Failure handling
 - A genuinely empty-but-valid catalog (the source returns zero records) is
   cached and returned as an empty list, never an error (Requirements 2.4, 10.7).
 
-Partial-parse design choice
-----------------------------
+Partial-parse behavior
+----------------------
 When the source returns content in which at least one but not all records parse
-(``parser.is_partial_parse`` is true), ``get_events`` **caches the successfully
-parsed events and their fetch timestamp first, then raises**
-``CatalogPartialParseError`` (Requirement 11.4). Per the design's Error Handling
-section, ``source_partial`` is an error response that excludes data, so the
-current call signals partial to the caller and the tool layer returns the
-``source_partial`` error. Caching first is deliberate: the valid events stay in
-memory for the TTL window, so a subsequent ``get_events`` call within that window
-is served from the fresh cache and returns the parsed events normally without a
-new upstream fetch. ``CatalogPartialParseError`` (rather than a return flag) is
-used because :mod:`aws_events_mcp.errors` already defines it as the partial-parse
-signal type and it composes naturally with the source-error propagation above.
+(``parser.is_partial_parse`` is true), ``get_events`` **caches and returns the
+successfully parsed events** and logs a warning identifying that some records
+were skipped (Requirement 11.4). A partial parse is a successful, degraded
+result — never an error — consistent with the lenient per-record skip-and-warn
+behavior of Requirement 10. Only a wholly uninterpretable response (non-empty
+content, zero valid events) is an error (``CatalogUnparseableError``,
+Requirement 11.3).
 """
 
 import asyncio
 import time
 from aws_events_mcp import consts
-from aws_events_mcp.errors import CatalogPartialParseError, CatalogUnparseableError
+from aws_events_mcp.errors import CatalogUnparseableError
 from aws_events_mcp.models import Event
 from aws_events_mcp.parser import is_partial_parse, parse_events
 from aws_events_mcp.source import EventCatalogSource
@@ -122,9 +118,11 @@ class CatalogCache:
                 (Requirements 2.5, 11.2).
             CatalogUnparseableError: The source returned content that yielded no
                 valid events (Requirement 11.3).
-            CatalogPartialParseError: At least one but not all records parsed;
-                the successfully parsed events are cached before this is raised
-                (Requirement 11.4).
+
+        Note:
+            A partial parse (at least one but not all records parsed) is NOT an
+            error: the successfully parsed events are returned and a warning is
+            logged for the skipped records (Requirement 11.4).
         """
         if not force_refresh and self._is_fresh():
             return list(self._cached_events())
@@ -168,8 +166,6 @@ class CatalogCache:
             CatalogTimeoutError: Propagated from the source (Req 2.5, 11.2).
             CatalogUnparseableError: Propagated from the source, or raised here
                 when non-empty content yielded zero valid events (Req 11.3).
-            CatalogPartialParseError: Raised after caching when some but not all
-                records parsed (Requirement 11.4).
         """
         # Retrieval failures (unreachable/timeout/unparseable body) propagate
         # unchanged for the tool layer to map onto source_* responses.
@@ -191,19 +187,20 @@ class CatalogCache:
             )
 
         # Cache the successfully parsed events (including an empty-but-valid
-        # catalog) with a fresh timestamp before signaling a partial parse, so
-        # the valid events remain available within the TTL window.
+        # catalog) with a fresh timestamp.
         self._events = events
         self._fetched_at = time.monotonic()
 
+        # Partial parse (some but not all records parsed) is a SUCCESSFUL,
+        # degraded result, not an error (Requirement 11.4): the successfully
+        # parsed events are returned and a warning identifies the skipped
+        # records, consistent with the lenient per-record skip-and-warn behavior
+        # of Requirement 10. It is never surfaced as a source_partial error.
         if is_partial_parse(record_count, events):
             logger.warning(
                 f'AWS Events catalog partially parsed: {len(events)} of {record_count} '
-                f'record(s) produced a valid event; {len(warnings)} skipped.'
-            )
-            raise CatalogPartialParseError(
-                'The AWS Events catalog response was partially uninterpretable: '
-                f'{len(events)} of {record_count} records could be parsed.'
+                f'record(s) produced a valid event; {len(warnings)} skipped. Returning the '
+                'successfully parsed events.'
             )
 
         return events

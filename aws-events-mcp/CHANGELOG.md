@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-05
+
+### Fixed
+
+- A partial parse of the upstream catalog (some but not all records parse) now returns the
+  successfully parsed events as a successful, degraded result instead of an empty
+  `source_partial` error that discarded them. This fixes intermittent empty results. Only a
+  wholly uninterpretable response (non-empty content, zero valid events) remains an error
+  (`source_unparseable`).
+
+### Changed
+
+- The upstream catalog request now matches the live catalog page: it excludes third-party and
+  archived items via `tags.id` exclusion filters and adds `sort_by`/`sort_order`, aligning the
+  catalog size returned by the server with what the website shows.
+
 ## [0.1.1] - 2026-06-25
 
 ### Added
@@ -38,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Distribution artifacts: `pyproject.toml` (uv/hatchling), Dockerfile, and standard
   documentation files (`README.md`, `CHANGELOG.md`, `LICENSE`, `NOTICE`).
 
-[Unreleased]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/aws-samples/sample-smb-solutions/releases/tag/v0.1.0
