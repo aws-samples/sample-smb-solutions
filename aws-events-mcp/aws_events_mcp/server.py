@@ -64,7 +64,13 @@ from aws_events_mcp.models import (
 )
 from aws_events_mcp.pagination import PageToken, PageTokenError
 from aws_events_mcp.query import apply_query, paginate
-from aws_events_mcp.source import JsonApiCatalogSource
+from aws_events_mcp.source import (
+    BuilderLoftCatalogSource,
+    CompositeCatalogSource,
+    ConnectedCommunityCatalogSource,
+    EventCatalogSource,
+    JsonApiCatalogSource,
+)
 from datetime import date, datetime, timezone
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
@@ -127,8 +133,9 @@ mcp = FastMCP(
 # --- Catalog cache wiring ----------------------------------------------------
 # The tool layer depends on a single process-wide CatalogCache so the parsed
 # catalog is fetched once per TTL window and shared across tool invocations
-# (NFR Performance). The cache is built lazily on first use, backed by the
-# primary JSON-API source, so importing this module performs no network I/O.
+# (NFR Performance). The cache is built lazily on first use, backed by a
+# composite union of the enabled upstream sources, so importing this module
+# performs no network I/O.
 
 #: Process-wide catalog cache, created lazily by ``get_catalog_cache``.
 _catalog_cache: Optional[CatalogCache] = None
@@ -161,12 +168,48 @@ def _resolve_cache_ttl_seconds() -> int:
     return ttl
 
 
+def _build_default_source() -> EventCatalogSource:
+    """Build the default catalog source: a union of the enabled upstreams.
+
+    Composes the primary AWS Events content-directory source with, when enabled
+    via the environment, the AWS Summits content-directory source, the AWS
+    Builder Loft calendar source, and the AWS Connected Community events hub. A
+    :class:`~aws_events_mcp.source.CompositeCatalogSource` fetches them
+    concurrently and returns the de-duplicated union so a single source outage
+    degrades gracefully rather than failing the whole catalog.
+
+    Returns:
+        The composed :class:`~aws_events_mcp.source.EventCatalogSource`.
+    """
+    sources: list[tuple[str, EventCatalogSource]] = [
+        ('events-catalog', JsonApiCatalogSource()),
+    ]
+    if consts.ENABLE_SUMMITS:
+        sources.append(
+            (
+                'aws-summits',
+                JsonApiCatalogSource(
+                    directory_id=consts.SUMMITS_DIRECTORY_ID,
+                    query_params=consts.SUMMITS_QUERY_PARAMS,
+                    tag_exclusions=consts.SUMMITS_TAG_EXCLUSIONS,
+                ),
+            )
+        )
+    if consts.ENABLE_BUILDER_LOFT:
+        sources.append(('builder-loft', BuilderLoftCatalogSource()))
+    if consts.ENABLE_CONNECTED_COMMUNITY:
+        sources.append(('connected-community', ConnectedCommunityCatalogSource()))
+    return CompositeCatalogSource(sources)
+
+
 def get_catalog_cache() -> CatalogCache:
     """Return the shared catalog cache, creating it on first use.
 
-    The cache is backed by :class:`~aws_events_mcp.source.JsonApiCatalogSource`
-    (the primary content-directory strategy) and reused across all tool calls so
-    the catalog is fetched and parsed at most once per TTL window.
+    The cache is backed by a :class:`~aws_events_mcp.source.CompositeCatalogSource`
+    that unions the primary AWS Events catalog with the AWS Summits, AWS Builder
+    Loft, and AWS Connected Community sources (each toggleable via the
+    environment) and is reused across all tool calls so the catalog is fetched
+    and parsed at most once per TTL window.
 
     Returns:
         The process-wide :class:`~aws_events_mcp.catalog.CatalogCache` instance.
@@ -174,7 +217,7 @@ def get_catalog_cache() -> CatalogCache:
     global _catalog_cache
     if _catalog_cache is None:
         _catalog_cache = CatalogCache(
-            JsonApiCatalogSource(), ttl_seconds=_resolve_cache_ttl_seconds()
+            _build_default_source(), ttl_seconds=_resolve_cache_ttl_seconds()
         )
     return _catalog_cache
 

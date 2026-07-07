@@ -74,6 +74,22 @@ ENV_CATALOG_DIRECTORY_ID = 'AWS_EVENTS_CATALOG_DIRECTORY_ID'
 ENV_CATALOG_QUERY_PARAMS = 'AWS_EVENTS_CATALOG_QUERY_PARAMS'
 #: Override (JSON array string) for the upstream ``tags.id`` exclusion filters.
 ENV_CATALOG_TAG_EXCLUSIONS = 'AWS_EVENTS_CATALOG_TAG_EXCLUSIONS'
+#: Override for the AWS Summits content-directory identifier.
+ENV_SUMMITS_DIRECTORY_ID = 'AWS_EVENTS_SUMMITS_DIRECTORY_ID'
+#: Toggle (truthy) to include the AWS Summits source in the composite catalog.
+ENV_ENABLE_SUMMITS = 'AWS_EVENTS_ENABLE_SUMMITS'
+#: Toggle (truthy) to include the AWS Builder Loft source in the composite catalog.
+ENV_ENABLE_BUILDER_LOFT = 'AWS_EVENTS_ENABLE_BUILDER_LOFT'
+#: Override for the AWS Builder Loft Cvent calendar identifier.
+ENV_BUILDER_LOFT_CALENDAR_ID = 'AWS_EVENTS_BUILDER_LOFT_CALENDAR_ID'
+#: Override for the AWS Builder Loft events base URL.
+ENV_BUILDER_LOFT_BASE_URL = 'AWS_EVENTS_BUILDER_LOFT_BASE_URL'
+#: Toggle (truthy) to include the AWS Connected Community source in the composite.
+ENV_ENABLE_CONNECTED_COMMUNITY = 'AWS_EVENTS_ENABLE_CONNECTED_COMMUNITY'
+#: Override for the AWS Connected Community events base URL.
+ENV_CONNECTED_COMMUNITY_BASE_URL = 'AWS_EVENTS_CONNECTED_COMMUNITY_BASE_URL'
+#: Override for the AWS Connected Community region/segment path (e.g. ``amer/smb``).
+ENV_CONNECTED_COMMUNITY_SEGMENT_PATH = 'AWS_EVENTS_CONNECTED_COMMUNITY_SEGMENT_PATH'
 
 
 # --- Defaults ----------------------------------------------------------------
@@ -142,6 +158,69 @@ DEFAULT_CATALOG_TAG_EXCLUSIONS: tuple[str, ...] = (
 )
 
 
+# --- AWS Summits content-directory configuration ----------------------------
+# The AWS Summits hub is served by the SAME content-directory search API as the
+# primary events catalog (identical response shape: ``items[].item`` with an
+# ``additionalFields`` sub-mapping and sibling ``tags``), so it reuses
+# :class:`~aws_events_mcp.source.JsonApiCatalogSource` and the existing parser
+# unchanged — only the directory id, ordering, and (empty) tag exclusions differ.
+
+#: Directory identifier for the AWS Summits interactive-cards hub.
+DEFAULT_SUMMITS_DIRECTORY_ID = (
+    'events-cards-interactive-summits-cards-interactive-events-summits-hub'
+)
+#: Base upstream query parameters for the Summits directory. Mirrors the live
+#: Summits hub request: English locale, full page size, ordered by publish date
+#: ascending. ``item.directoryId`` and ``page`` are added per request.
+DEFAULT_SUMMITS_QUERY_PARAMS: dict[str, str] = {
+    'item.locale': 'en_US',
+    'sort_by': 'item.additionalFields.publishedDate',
+    'sort_order': 'asc',
+    'size': str(MAX_PAGE_SIZE),
+}
+#: The Summits directory sends no ``tags.id`` exclusion filters.
+DEFAULT_SUMMITS_TAG_EXCLUSIONS: tuple[str, ...] = ()
+
+
+# --- AWS Builder Loft calendar configuration --------------------------------
+# The AWS Builder Loft calendar is backed by a Cvent-hosted events site. Its
+# records are retrieved via a two-step guest-token flow (scrape a short-lived
+# bearer token from the calendar HTML shell, then call the JSON props endpoint)
+# implemented by :class:`~aws_events_mcp.source.BuilderLoftCatalogSource`.
+
+#: Default Builder Loft Cvent calendar identifier.
+DEFAULT_BUILDER_LOFT_CALENDAR_ID = 'fc4e2932-9284-4564-982e-8764e037c5a7'
+#: Default Builder Loft events base URL.
+DEFAULT_BUILDER_LOFT_BASE_URL = 'https://events.builder.aws.com'
+#: Browser-like ``User-Agent`` for the Builder Loft HTML shell fetch. The shell
+#: blocks non-browser agents, so a realistic browser string is required to reach
+#: the embedded guest token; the subsequent JSON props call uses the descriptive
+#: :data:`USER_AGENT` instead.
+DEFAULT_BUILDER_LOFT_BROWSER_USER_AGENT = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+)
+
+
+# --- AWS Connected Community configuration ----------------------------------
+# The AWS Connected Community events hub (aws-experience.com) is backed by a
+# plain, credential-free JSON API: a GET against
+# ``<base>/<segment>/api/externalevent`` returns ``{"future": [...], "past":
+# [...]}`` where each entry is a flat event object. Records are mapped into the
+# parser-ready flat shape by
+# :func:`~aws_events_mcp.source._map_connected_community_event`, so the existing
+# parser and Event model are reused unchanged. Implemented by
+# :class:`~aws_events_mcp.source.ConnectedCommunityCatalogSource`.
+
+#: Default AWS Connected Community base URL.
+DEFAULT_CONNECTED_COMMUNITY_BASE_URL = 'https://aws-experience.com'
+#: Default AWS Connected Community region/segment path. The public events page
+#: the user referenced is ``https://aws-experience.com/amer/smb/events``; the
+#: backing API lives under the same ``amer/smb`` prefix. Overridable so other
+#: regions/segments (e.g. ``emea/smb``) can be selected without a code change.
+DEFAULT_CONNECTED_COMMUNITY_SEGMENT_PATH = 'amer/smb'
+
+
 def _resolve_query_params() -> dict[str, str]:
     """Resolve upstream query parameters, honoring the environment override.
 
@@ -182,6 +261,31 @@ def _resolve_tag_exclusions() -> tuple[str, ...]:
     return tuple(str(value) for value in parsed)
 
 
+def _resolve_bool(env_name: str, *, default: bool) -> bool:
+    """Resolve a boolean toggle from the environment, honoring truthy strings.
+
+    Args:
+        env_name: The environment variable to read.
+        default: The value returned when the variable is unset or blank.
+
+    Returns:
+        ``True`` when the variable holds a common truthy string (``1``, ``true``,
+        ``yes``, ``on``), ``False`` for a common falsy string (``0``, ``false``,
+        ``no``, ``off``), and ``default`` when unset, blank, or unrecognized.
+    """
+    raw = os.getenv(env_name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if not value:
+        return default
+    if value in ('1', 'true', 'yes', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'off'):
+        return False
+    return default
+
+
 #: Effective content-directory endpoint URL (env override applied at import).
 CATALOG_ENDPOINT_URL = os.getenv(ENV_CATALOG_ENDPOINT_URL, DEFAULT_CATALOG_ENDPOINT_URL)
 #: Effective content-directory identifier (env override applied at import).
@@ -190,3 +294,32 @@ CATALOG_DIRECTORY_ID = os.getenv(ENV_CATALOG_DIRECTORY_ID, DEFAULT_CATALOG_DIREC
 CATALOG_QUERY_PARAMS = _resolve_query_params()
 #: Effective ``tags.id`` exclusion filters (env override applied at import).
 CATALOG_TAG_EXCLUSIONS = _resolve_tag_exclusions()
+
+#: Effective AWS Summits directory identifier (env override applied at import).
+SUMMITS_DIRECTORY_ID = os.getenv(ENV_SUMMITS_DIRECTORY_ID, DEFAULT_SUMMITS_DIRECTORY_ID)
+#: Effective AWS Summits query parameters.
+SUMMITS_QUERY_PARAMS = dict(DEFAULT_SUMMITS_QUERY_PARAMS)
+#: Effective AWS Summits ``tags.id`` exclusion filters (none).
+SUMMITS_TAG_EXCLUSIONS = DEFAULT_SUMMITS_TAG_EXCLUSIONS
+#: Whether the AWS Summits source is enabled (default enabled).
+ENABLE_SUMMITS = _resolve_bool(ENV_ENABLE_SUMMITS, default=True)
+
+#: Effective AWS Builder Loft calendar identifier (env override applied at import).
+BUILDER_LOFT_CALENDAR_ID = os.getenv(
+    ENV_BUILDER_LOFT_CALENDAR_ID, DEFAULT_BUILDER_LOFT_CALENDAR_ID
+)
+#: Effective AWS Builder Loft base URL (env override applied at import).
+BUILDER_LOFT_BASE_URL = os.getenv(ENV_BUILDER_LOFT_BASE_URL, DEFAULT_BUILDER_LOFT_BASE_URL)
+#: Whether the AWS Builder Loft source is enabled (default enabled).
+ENABLE_BUILDER_LOFT = _resolve_bool(ENV_ENABLE_BUILDER_LOFT, default=True)
+
+#: Effective AWS Connected Community base URL (env override applied at import).
+CONNECTED_COMMUNITY_BASE_URL = os.getenv(
+    ENV_CONNECTED_COMMUNITY_BASE_URL, DEFAULT_CONNECTED_COMMUNITY_BASE_URL
+)
+#: Effective AWS Connected Community region/segment path (env override applied).
+CONNECTED_COMMUNITY_SEGMENT_PATH = os.getenv(
+    ENV_CONNECTED_COMMUNITY_SEGMENT_PATH, DEFAULT_CONNECTED_COMMUNITY_SEGMENT_PATH
+)
+#: Whether the AWS Connected Community source is enabled (default enabled).
+ENABLE_CONNECTED_COMMUNITY = _resolve_bool(ENV_ENABLE_CONNECTED_COMMUNITY, default=True)

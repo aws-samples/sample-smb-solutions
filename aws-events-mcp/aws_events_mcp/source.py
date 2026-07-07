@@ -54,6 +54,8 @@ Confirmed contract (task 8.2):
     data, and it raises ``CatalogUnparseableError`` when no records are found.
 """
 
+import asyncio
+import html
 import httpx
 import json
 import re
@@ -63,6 +65,7 @@ from aws_events_mcp.errors import (
     CatalogUnparseableError,
     CatalogUnreachableError,
 )
+from loguru import logger
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
@@ -79,6 +82,14 @@ DEFAULT_CATALOG_PAGE_URL = 'https://aws.amazon.com/events/explore-aws-events/'
 # Matches the contents of <script> blocks, where client-rendered pages of this
 # style embed their backing data as JSON.
 _SCRIPT_RE = re.compile(r'<script[^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
+
+# Extracts the short-lived guest bearer token embedded in the Builder Loft
+# calendar HTML shell's ``applicationSettings`` block, e.g.
+# ``authorization: '9f3c...<hex>'``.
+_BUILDER_LOFT_TOKEN_RE = re.compile(r"authorization:\s*'([a-f0-9]{32,})'", re.IGNORECASE)
+
+# Strips HTML tags from a Builder Loft event description to recover plain text.
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
 
 
 @runtime_checkable
@@ -106,7 +117,10 @@ class EventCatalogSource(Protocol):
 
 
 async def _request(
-    client: httpx.AsyncClient, url: str, params: Optional[dict[str, Any]] = None
+    client: httpx.AsyncClient,
+    url: str,
+    params: Optional[dict[str, Any]] = None,
+    headers: Optional[dict[str, str]] = None,
 ) -> httpx.Response:
     """Issue a GET request and translate transport failures into typed errors.
 
@@ -114,6 +128,7 @@ async def _request(
         client: The async HTTP client to use.
         url: The absolute URL to request.
         params: Optional query parameters.
+        headers: Optional per-request headers merged over the client's defaults.
 
     Returns:
         The successful HTTP response.
@@ -124,7 +139,7 @@ async def _request(
             error, or a non-success HTTP status (Requirement 11.1).
     """
     try:
-        response = await client.get(url, params=params)
+        response = await client.get(url, params=params, headers=headers)
     except httpx.TimeoutException as exc:
         # Checked before ConnectError: httpx.ConnectTimeout subclasses both, and
         # a timeout must surface as CatalogTimeoutError (Requirement 11.2).
@@ -497,3 +512,498 @@ class HtmlScrapeCatalogSource:
                 'The AWS Events catalog page contained no recognizable records.'
             )
         return records
+
+
+def _strip_html(value: Any) -> str:
+    """Reduce an HTML fragment to unescaped plain text.
+
+    Builder Loft event descriptions are HTML fragments; the parser expects a
+    plain-text description. Tags are removed, HTML entities are unescaped, and
+    surrounding whitespace is collapsed. Non-string input yields an empty string.
+
+    Args:
+        value: The raw description value (expected to be an HTML string).
+
+    Returns:
+        The plain-text description, or an empty string when ``value`` is not a
+        string.
+    """
+    if not isinstance(value, str):
+        return ''
+    without_tags = _HTML_TAG_RE.sub(' ', value)
+    unescaped = html.unescape(without_tags)
+    return ' '.join(unescaped.split())
+
+
+def _map_builder_loft_event(base_url: str, calendar_id: str, event: Any) -> Optional[dict]:
+    """Map a single Builder Loft event object into a flat parser-ready record.
+
+    Produces a flat dict whose keys the existing parser (:func:`_merged_fields`,
+    ``_FIELD_KEYS``, ``_derive_location_mode``) already understands, so no parser
+    change is needed. The Cvent ``startDate`` is an unzoned ``YYYY-MM-DDTHH:MM``
+    string; its date portion maps to the required ``start_date`` and the time
+    portion to ``start_time``. The Cvent ``timeZone`` is a resource placeholder
+    (not an IANA/label zone) and is deliberately omitted. Delivery mode is set
+    explicitly to ``physical`` (Builder Loft is an in-person venue).
+
+    Args:
+        base_url: The Builder Loft base URL, used to build the calendar deep link.
+        calendar_id: The Cvent calendar identifier, used in the deep link.
+        event: A single Builder Loft event object (expected to be a mapping).
+
+    Returns:
+        A flat record dict for the parser, or ``None`` when ``event`` is not a
+        mapping or carries no usable identifier.
+    """
+    if not isinstance(event, dict):
+        return None
+    event_id = event.get('id')
+    if not isinstance(event_id, str) or not event_id.strip():
+        return None
+
+    record: dict[str, Any] = {'id': f'builder-loft#{event_id}'}
+
+    title = event.get('title')
+    if isinstance(title, str):
+        record['title'] = title
+
+    description = _strip_html(event.get('description'))
+    if description:
+        record['description'] = description
+
+    start_date = event.get('startDate')
+    if isinstance(start_date, str) and start_date.strip():
+        date_part, _, time_part = start_date.partition('T')
+        record['date'] = date_part.strip()
+        if time_part.strip():
+            record['time'] = time_part.strip()
+
+    location = event.get('location')
+    if isinstance(location, str):
+        record['location'] = location
+
+    # Builder Loft is an in-person venue; honor an explicit delivery mode so the
+    # parser does not have to infer it from free text.
+    record['location_mode'] = 'physical'
+
+    # No per-event public URL exists; deep-link to the calendar itself.
+    record['learn_more_url'] = f'{base_url}/c/calendar/{calendar_id}'
+
+    return record
+
+
+#: Matches the leading ``HH:MM`` of a Connected Community localized timestamp
+#: such as ``2026-07-07T12:00-04:00`` (the offset/seconds are discarded).
+_CC_TIME_RE = re.compile(r'^(\d{2}:\d{2})')
+
+#: Connected Community ``settingDetails[].setting`` values denoting in-person.
+_CC_PHYSICAL_SETTINGS = frozenset({'in-person', 'in person', 'inperson', 'physical', 'venue'})
+
+
+def _map_connected_community_event(event: Any) -> Optional[dict]:
+    """Map a single Connected Community event into a flat parser-ready record.
+
+    Produces a flat dict whose keys the existing parser (:func:`_merged_fields`,
+    ``_FIELD_KEYS``) already understands, so no parser change is needed. The
+    Connected Community ``externalevent`` API returns flat event objects with an
+    unzoned ``startDate`` (``YYYY-MM-DD``), a localized ``startWithTimeZone``
+    (``YYYY-MM-DDTHH:MM±HH:MM``), an IANA ``timeZone``, a ``settingDetails`` list
+    carrying the delivery mode, and a numeric ``levels`` list. Delivery mode is
+    set explicitly from ``settingDetails`` (defaulting to virtual, which the hub
+    is overwhelmingly composed of), and the lowest numeric level is passed
+    through as the learning level.
+
+    Args:
+        event: A single Connected Community event object (expected to be a
+            mapping).
+
+    Returns:
+        A flat record dict for the parser, or ``None`` when ``event`` is not a
+        mapping or carries no usable identifier.
+    """
+    if not isinstance(event, dict):
+        return None
+    event_id = event.get('id')
+    if not isinstance(event_id, str) or not event_id.strip():
+        return None
+
+    record: dict[str, Any] = {'id': f'connected-community#{event_id.strip()}'}
+
+    title = event.get('title')
+    if isinstance(title, str):
+        record['title'] = title
+
+    # The plain-text ``summary`` is preferred; fall back to the HTML description.
+    summary = event.get('summary')
+    if isinstance(summary, str) and summary.strip():
+        record['description'] = summary.strip()
+    else:
+        description = _strip_html(event.get('description'))
+        if description:
+            record['description'] = description
+
+    start_date = event.get('startDate')
+    if isinstance(start_date, str) and start_date.strip():
+        record['date'] = start_date.strip()
+
+    # Recover a local start time from the localized timestamp (drop the offset).
+    start_with_tz = event.get('startWithTimeZone')
+    if isinstance(start_with_tz, str) and 'T' in start_with_tz:
+        match = _CC_TIME_RE.match(start_with_tz.split('T', 1)[1])
+        if match is not None:
+            record['time'] = match.group(1)
+
+    time_zone = event.get('timeZone')
+    if isinstance(time_zone, str) and time_zone.strip():
+        record['timezone'] = time_zone.strip()
+
+    # Delivery mode: honor an explicit in-person setting, else default virtual.
+    mode = 'virtual'
+    settings = event.get('settingDetails')
+    if isinstance(settings, list):
+        for setting in settings:
+            if isinstance(setting, dict):
+                name = setting.get('setting')
+                if isinstance(name, str) and name.strip().lower() in _CC_PHYSICAL_SETTINGS:
+                    mode = 'physical'
+                    break
+    record['location_mode'] = mode
+
+    # Learning level: pass through the lowest numeric level (100/200/300/400),
+    # which the parser normalizes to the canonical LearningLevel.
+    levels = event.get('levels')
+    if isinstance(levels, list):
+        numeric = [lv for lv in levels if isinstance(lv, str) and lv.strip().isdigit()]
+        if numeric:
+            record['level'] = min(numeric, key=lambda value: int(value))
+
+    registration_url = event.get('registrationUrl')
+    if isinstance(registration_url, str) and registration_url.strip():
+        record['registration_url'] = registration_url.strip()
+        record['learn_more_url'] = registration_url.strip()
+
+    return record
+
+
+class ConnectedCommunityCatalogSource:
+    """Source strategy: the AWS Connected Community events hub (aws-experience.com).
+
+    Retrieves records from a plain, credential-free JSON API: a single GET
+    against ``<base>/<segment>/api/externalevent`` returns
+    ``{"future": [...], "past": [...]}`` where each entry is a flat event object.
+    Both buckets are mapped into flat records the existing parser already
+    understands (see :func:`_map_connected_community_event`), so no parser change
+    is needed. Sends a descriptive ``User-Agent`` and a 30-second total timeout,
+    and uses no credentials.
+
+    Transport failures follow the shared typed-error contract: a connection
+    failure raises ``CatalogUnreachableError`` (Requirement 11.1), a timeout
+    raises ``CatalogTimeoutError`` (Requirement 11.2), and a body that is not
+    valid JSON or lacks both the ``future`` and ``past`` buckets raises
+    ``CatalogUnparseableError`` (Requirement 11.3).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = consts.CONNECTED_COMMUNITY_BASE_URL,
+        segment_path: str = consts.CONNECTED_COMMUNITY_SEGMENT_PATH,
+        timeout_seconds: float = consts.REQUEST_TIMEOUT_SECONDS,
+        user_agent: str = consts.USER_AGENT,
+    ) -> None:
+        """Initialize the Connected Community catalog source.
+
+        Args:
+            base_url: Connected Community base URL (e.g.
+                ``https://aws-experience.com``).
+            segment_path: Region/segment path (e.g. ``amer/smb``).
+            timeout_seconds: Total request timeout in seconds (Requirement 11.2).
+            user_agent: Descriptive ``User-Agent`` header value (NFR Security).
+        """
+        self._base_url = base_url.rstrip('/')
+        self._segment_path = segment_path.strip('/')
+        self._timeout = httpx.Timeout(timeout_seconds)
+        self._user_agent = user_agent
+
+    @property
+    def _events_url(self) -> str:
+        """The Connected Community external-event JSON endpoint URL."""
+        return f'{self._base_url}/{self._segment_path}/api/externalevent'
+
+    async def fetch_raw_records(self) -> list[dict]:
+        """Fetch the Connected Community events as flat parser-ready records.
+
+        Returns:
+            A flat list of mapped record dicts (the ``future`` bucket followed by
+            the ``past`` bucket). An empty list denotes a reachable hub with no
+            events.
+
+        Raises:
+            CatalogUnreachableError: The source could not be reached (Req 11.1).
+            CatalogTimeoutError: The request exceeded the 30 second limit (Req 11.2).
+            CatalogUnparseableError: The body was not decodable JSON, or carried
+                neither a ``future`` nor a ``past`` bucket (Requirement 11.3).
+        """
+        headers = {'User-Agent': self._user_agent, 'Accept': 'application/json'}
+        async with httpx.AsyncClient(timeout=self._timeout, headers=headers) as client:
+            response = await _request(client, self._events_url)
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise CatalogUnparseableError(
+                    'The AWS Connected Community response could not be interpreted as JSON.'
+                ) from exc
+
+        if not isinstance(payload, dict) or (
+            'future' not in payload and 'past' not in payload
+        ):
+            raise CatalogUnparseableError(
+                'The AWS Connected Community response contained no recognizable event buckets.'
+            )
+
+        records: list[dict] = []
+        for bucket in ('future', 'past'):
+            items = payload.get(bucket)
+            if isinstance(items, list):
+                for event in items:
+                    mapped = _map_connected_community_event(event)
+                    if mapped is not None:
+                        records.append(mapped)
+        return records
+
+
+class BuilderLoftCatalogSource:
+    """Source strategy: the AWS Builder Loft calendar (Cvent-backed).
+
+    Retrieves records via a two-step guest-token flow that requires no
+    credentials:
+
+    1. GET the calendar HTML shell with a browser-like ``User-Agent`` and scrape
+       the short-lived bearer token from its ``applicationSettings`` block.
+    2. GET the calendar ``props`` JSON endpoint with an ``Authorization: BEARER
+       <token>`` header and read the events out of ``calendar.events``.
+
+    Each Builder Loft event is mapped into a flat record the existing parser
+    already understands (see :func:`_map_builder_loft_event`). The props endpoint
+    returns only the default upcoming set (~20 events); further pagination is a
+    documented limitation and is intentionally not attempted.
+
+    Transport failures follow the shared typed-error contract: a connection
+    failure raises ``CatalogUnreachableError`` (Requirement 11.1), a timeout
+    raises ``CatalogTimeoutError`` (Requirement 11.2), and a missing token or an
+    undecodable / shape-invalid props body raises ``CatalogUnparseableError``
+    (Requirement 11.3).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = consts.BUILDER_LOFT_BASE_URL,
+        calendar_id: str = consts.BUILDER_LOFT_CALENDAR_ID,
+        timeout_seconds: float = consts.REQUEST_TIMEOUT_SECONDS,
+        user_agent: str = consts.USER_AGENT,
+        browser_user_agent: str = consts.DEFAULT_BUILDER_LOFT_BROWSER_USER_AGENT,
+    ) -> None:
+        """Initialize the Builder Loft catalog source.
+
+        Args:
+            base_url: Builder Loft events base URL.
+            calendar_id: Cvent calendar identifier.
+            timeout_seconds: Total request timeout in seconds (Requirement 11.2).
+            user_agent: Descriptive ``User-Agent`` for the JSON props call
+                (NFR Security).
+            browser_user_agent: Browser-like ``User-Agent`` for the HTML shell
+                fetch so the guest token page is not blocked.
+        """
+        self._base_url = base_url.rstrip('/')
+        self._calendar_id = calendar_id
+        self._timeout = httpx.Timeout(timeout_seconds)
+        self._user_agent = user_agent
+        self._browser_user_agent = browser_user_agent
+
+    @property
+    def _calendar_url(self) -> str:
+        """The calendar HTML shell URL carrying the embedded guest token."""
+        return f'{self._base_url}/c/calendar/{self._calendar_id}'
+
+    @property
+    def _props_url(self) -> str:
+        """The calendar props JSON endpoint URL."""
+        return (
+            f'{self._base_url}/api/calendar_site_editor/v1/{self._calendar_id}/props?latest=false'
+        )
+
+    async def _fetch_token(self, client: httpx.AsyncClient) -> str:
+        """Fetch the HTML shell and extract the guest bearer token.
+
+        Args:
+            client: The async HTTP client to use.
+
+        Returns:
+            The extracted guest token string.
+
+        Raises:
+            CatalogUnparseableError: The shell contained no extractable token.
+            CatalogTimeoutError: The request timed out.
+            CatalogUnreachableError: The source could not be reached.
+        """
+        response = await _request(client, self._calendar_url)
+        match = _BUILDER_LOFT_TOKEN_RE.search(response.text)
+        if match is None:
+            raise CatalogUnparseableError(
+                'The AWS Builder Loft calendar page did not contain a guest access token.'
+            )
+        return match.group(1)
+
+    async def _fetch_props(self, client: httpx.AsyncClient, token: str) -> Any:
+        """Fetch and decode the calendar props JSON with the bearer token.
+
+        Args:
+            client: The async HTTP client to use.
+            token: The guest bearer token scraped from the HTML shell.
+
+        Returns:
+            The decoded JSON value.
+
+        Raises:
+            CatalogUnparseableError: The props body is not valid JSON.
+            CatalogTimeoutError: The request timed out.
+            CatalogUnreachableError: The source could not be reached.
+        """
+        # The endpoint expects the literal, uppercase word BEARER in the header.
+        headers = {'Authorization': f'BEARER {token}'}
+        response = await _request(client, self._props_url, headers=headers)
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CatalogUnparseableError(
+                'The AWS Builder Loft props response could not be interpreted as JSON.'
+            ) from exc
+
+    async def fetch_raw_records(self) -> list[dict]:
+        """Fetch the Builder Loft calendar events as flat parser-ready records.
+
+        Returns:
+            A flat list of mapped record dicts (the default upcoming set, ~20).
+            An empty list denotes a reachable calendar with no events.
+
+        Raises:
+            CatalogUnreachableError: The source could not be reached (Req 11.1).
+            CatalogTimeoutError: A request exceeded the 30 second limit (Req 11.2).
+            CatalogUnparseableError: The token could not be extracted, or the
+                props body was not decodable / lacked ``calendar.events``
+                (Requirement 11.3).
+        """
+        html_headers = {'User-Agent': self._browser_user_agent, 'Accept': 'text/html'}
+        json_headers = {'User-Agent': self._user_agent, 'Accept': 'application/json'}
+
+        async with httpx.AsyncClient(timeout=self._timeout, headers=html_headers) as client:
+            token = await self._fetch_token(client)
+
+        async with httpx.AsyncClient(timeout=self._timeout, headers=json_headers) as client:
+            payload = await self._fetch_props(client, token)
+
+        calendar = payload.get('calendar') if isinstance(payload, dict) else None
+        events = calendar.get('events') if isinstance(calendar, dict) else None
+        if not isinstance(events, dict):
+            raise CatalogUnparseableError(
+                'The AWS Builder Loft props response contained no calendar events.'
+            )
+
+        records: list[dict] = []
+        for event in events.values():
+            mapped = _map_builder_loft_event(self._base_url, self._calendar_id, event)
+            if mapped is not None:
+                records.append(mapped)
+        return records
+
+
+def _dedup_records(records: list[dict]) -> list[dict]:
+    """Drop records with a duplicate raw ``id``, keeping the first occurrence.
+
+    Union sources can overlap; a stable de-dup on the raw record identifier
+    keeps event ids unique across sources while preserving input order. Records
+    without a usable ``id`` are passed through unchanged (the parser skips
+    genuinely unusable records).
+
+    Args:
+        records: The concatenated raw records from all sources.
+
+    Returns:
+        The records with duplicate ids removed, in first-seen order.
+    """
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for record in records:
+        identifier = record.get('id') if isinstance(record, dict) else None
+        if isinstance(identifier, str):
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+        deduped.append(record)
+    return deduped
+
+
+class CompositeCatalogSource:
+    """Union strategy: concatenate raw records from several sources concurrently.
+
+    Runs each sub-source's ``fetch_raw_records`` concurrently and concatenates
+    the raw records of every source that succeeded, de-duplicating overlapping
+    record ids (first occurrence wins). Failures are handled for graceful
+    degradation, consistent with the lenient partial-parse philosophy:
+
+    - if **all** sources fail, the first error is re-raised so a total outage
+      still surfaces as a typed source error;
+    - if **some** sources fail, a warning naming the failed source(s) is logged
+      and the successful records are returned.
+
+    Each sub-source is paired with a short label used only in the warning.
+    """
+
+    def __init__(self, sources: list[tuple[str, EventCatalogSource]]) -> None:
+        """Initialize the composite source.
+
+        Args:
+            sources: An ordered list of ``(label, source)`` pairs. The label is a
+                short human-readable name used only for degradation warnings; the
+                order determines record concatenation and de-dup precedence.
+        """
+        self._sources = list(sources)
+
+    async def fetch_raw_records(self) -> list[dict]:
+        """Fetch and concatenate raw records from all sub-sources concurrently.
+
+        Returns:
+            The de-duplicated concatenation of the raw records from every
+            sub-source that succeeded, in source order.
+
+        Raises:
+            CatalogSourceError: When every sub-source failed; the first
+                encountered error is re-raised.
+        """
+        results = await asyncio.gather(
+            *(source.fetch_raw_records() for _, source in self._sources),
+            return_exceptions=True,
+        )
+
+        records: list[dict] = []
+        failures: list[tuple[str, BaseException]] = []
+        for (label, _), result in zip(self._sources, results):
+            if isinstance(result, BaseException):
+                failures.append((label, result))
+            else:
+                records.extend(result)
+
+        if failures and len(failures) == len(self._sources):
+            # Total outage: re-raise the first error so the tool layer maps it
+            # onto the matching source_* response.
+            raise failures[0][1]
+
+        if failures:
+            failed_labels = ', '.join(label for label, _ in failures)
+            logger.warning(
+                f'AWS Events catalog: {len(failures)} of {len(self._sources)} source(s) '
+                f'failed ({failed_labels}); returning records from the remaining source(s).'
+            )
+
+        return _dedup_records(records)
