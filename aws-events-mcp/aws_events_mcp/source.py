@@ -599,23 +599,74 @@ _CC_TIME_RE = re.compile(r'^(\d{2}:\d{2})')
 #: Connected Community ``settingDetails[].setting`` values denoting in-person.
 _CC_PHYSICAL_SETTINGS = frozenset({'in-person', 'in person', 'inperson', 'physical', 'venue'})
 
+#: Human-readable names for the Connected Community ``type`` facet. Unlisted
+#: values (e.g. the generic ``otherawsevent``) leave the event type unset.
+_CC_EVENT_TYPES: dict[str, str] = {
+    'handsonworkshop': 'Hands-on Workshop',
+    'technicaltalk': 'Tech Talk',
+    'businesstalk': 'Business Talk',
+    'meetup': 'Meetup',
+}
 
-def _map_connected_community_event(event: Any) -> Optional[dict]:
+
+def _cc_location_from_settings(settings: Any) -> Optional[str]:
+    """Extract a free-text location from Connected Community setting details.
+
+    Physical session records carry venue information under
+    ``settingDetails[].details`` (an ``address`` string and/or a
+    ``location: {"id": <city>}`` mapping). The street address is preferred; the
+    city identifier is the fallback.
+
+    Args:
+        settings: The record's ``settingDetails`` list.
+
+    Returns:
+        The extracted location text, or ``None`` when none is present.
+    """
+    if not isinstance(settings, list):
+        return None
+    for setting in settings:
+        if not isinstance(setting, dict):
+            continue
+        details = setting.get('details')
+        if not isinstance(details, dict):
+            continue
+        address = details.get('address')
+        if isinstance(address, str) and address.strip():
+            return address.strip()
+        location = details.get('location')
+        if isinstance(location, dict):
+            city = location.get('id')
+            if isinstance(city, str) and city.strip():
+                return city.strip().replace('-', ' ').title()
+    return None
+
+
+def _map_connected_community_event(
+    event: Any, *, page_base: Optional[str] = None
+) -> Optional[dict]:
     """Map a single Connected Community event into a flat parser-ready record.
 
     Produces a flat dict whose keys the existing parser (:func:`_merged_fields`,
-    ``_FIELD_KEYS``) already understands, so no parser change is needed. The
-    Connected Community ``externalevent`` API returns flat event objects with an
-    unzoned ``startDate`` (``YYYY-MM-DD``), a localized ``startWithTimeZone``
-    (``YYYY-MM-DDTHH:MM±HH:MM``), an IANA ``timeZone``, a ``settingDetails`` list
-    carrying the delivery mode, and a numeric ``levels`` list. Delivery mode is
-    set explicitly from ``settingDetails`` (defaulting to virtual, which the hub
-    is overwhelmingly composed of), and the lowest numeric level is passed
-    through as the learning level.
+    ``_FIELD_KEYS``) already understands, so no parser change is needed. Both
+    Connected Community feeds (``externalevent`` and ``session``) return flat
+    event objects with an unzoned ``startDate`` (``YYYY-MM-DD``), a localized
+    ``startWithTimeZone`` (``YYYY-MM-DDTHH:MM±HH:MM``), an IANA ``timeZone``, a
+    ``settingDetails`` list carrying the delivery mode (and, for physical
+    sessions, the venue), and a numeric ``levels`` list. Delivery mode is set
+    explicitly from ``settingDetails`` (defaulting to virtual, which the hub is
+    overwhelmingly composed of), the lowest numeric level is passed through as
+    the learning level, and the ``type`` facet (e.g. ``handsonworkshop``) maps
+    to a readable event type. Links prefer an explicit ``registrationUrl``
+    (``externalevent`` records); ``session`` records carry a ``urlSlug``
+    instead, which is resolved against ``page_base`` into the event page URL.
 
     Args:
         event: A single Connected Community event object (expected to be a
             mapping).
+        page_base: The segment page base (e.g.
+            ``https://aws-experience.com/amer/smb``) used to resolve ``urlSlug``
+            links; when ``None``, slug-only records yield no link.
 
     Returns:
         A flat record dict for the parser, or ``None`` when ``event`` is not a
@@ -633,14 +684,18 @@ def _map_connected_community_event(event: Any) -> Optional[dict]:
     if isinstance(title, str):
         record['title'] = title
 
-    # The plain-text ``summary`` is preferred; fall back to the HTML description.
+    # Combine the plain-text ``summary`` (leading) with the stripped HTML
+    # ``description`` so keyword search covers both, matching the site's own
+    # search behavior (which scans the full description).
     summary = event.get('summary')
-    if isinstance(summary, str) and summary.strip():
-        record['description'] = summary.strip()
-    else:
-        description = _strip_html(event.get('description'))
-        if description:
-            record['description'] = description
+    summary_text = summary.strip() if isinstance(summary, str) else ''
+    description_text = _strip_html(event.get('description'))
+    if summary_text and description_text and description_text != summary_text:
+        record['description'] = f'{summary_text} {description_text}'
+    elif summary_text:
+        record['description'] = summary_text
+    elif description_text:
+        record['description'] = description_text
 
     start_date = event.get('startDate')
     if isinstance(start_date, str) and start_date.strip():
@@ -669,6 +724,19 @@ def _map_connected_community_event(event: Any) -> Optional[dict]:
                     break
     record['location_mode'] = mode
 
+    # Physical sessions carry a venue address / city under settingDetails.
+    if mode == 'physical':
+        location = _cc_location_from_settings(settings)
+        if location is not None:
+            record['location'] = location
+
+    # The type facet (e.g. handsonworkshop) maps to a readable event type.
+    event_type = event.get('type')
+    if isinstance(event_type, str):
+        readable = _CC_EVENT_TYPES.get(event_type.strip().lower())
+        if readable is not None:
+            record['event_type'] = readable
+
     # Learning level: pass through the lowest numeric level (100/200/300/400),
     # which the parser normalizes to the canonical LearningLevel.
     levels = event.get('levels')
@@ -681,6 +749,14 @@ def _map_connected_community_event(event: Any) -> Optional[dict]:
     if isinstance(registration_url, str) and registration_url.strip():
         record['registration_url'] = registration_url.strip()
         record['learn_more_url'] = registration_url.strip()
+    elif page_base is not None:
+        # Session records carry a urlSlug instead of an explicit registration
+        # URL; resolve it into the segment's event page deep link.
+        url_slug = event.get('urlSlug')
+        if isinstance(url_slug, str) and url_slug.strip():
+            link = f'{page_base}/e/{url_slug.strip().lstrip("/")}'
+            record['registration_url'] = link
+            record['learn_more_url'] = link
 
     return record
 
@@ -688,20 +764,33 @@ def _map_connected_community_event(event: Any) -> Optional[dict]:
 class ConnectedCommunityCatalogSource:
     """Source strategy: the AWS Connected Community events hub (aws-experience.com).
 
-    Retrieves records from a plain, credential-free JSON API: a single GET
-    against ``<base>/<segment>/api/externalevent`` returns
-    ``{"future": [...], "past": [...]}`` where each entry is a flat event object.
-    Both buckets are mapped into flat records the existing parser already
-    understands (see :func:`_map_connected_community_event`), so no parser change
-    is needed. Sends a descriptive ``User-Agent`` and a 30-second total timeout,
-    and uses no credentials.
+    Retrieves records from plain, credential-free JSON APIs under the segment's
+    ``api`` prefix. Two feeds are fetched concurrently and concatenated:
 
+    - ``externalevent``: cross-posted events with explicit registration URLs;
+    - ``session``: the segment's own workshops/talks/meetups (the much larger
+      feed, and the one the site's search page draws from), whose ``urlSlug``
+      resolves to the event page under ``<base>/<segment>/e/<slug>``.
+
+    Each feed returns ``{"future": [...], "past": [...]}`` where every entry is
+    a flat event object. Both buckets of both feeds are mapped into flat records
+    the existing parser already understands (see
+    :func:`_map_connected_community_event`), so no parser change is needed.
+    Sends a descriptive ``User-Agent`` and a 30-second total timeout, and uses
+    no credentials.
+
+    Per-feed degradation mirrors the composite philosophy: if one feed fails but
+    the other succeeds, a warning is logged and the successful feed's records
+    are returned; only when every feed fails is the first error re-raised.
     Transport failures follow the shared typed-error contract: a connection
     failure raises ``CatalogUnreachableError`` (Requirement 11.1), a timeout
     raises ``CatalogTimeoutError`` (Requirement 11.2), and a body that is not
     valid JSON or lacks both the ``future`` and ``past`` buckets raises
     ``CatalogUnparseableError`` (Requirement 11.3).
     """
+
+    #: The segment API feeds fetched and unioned, in concatenation order.
+    _FEEDS: tuple[str, ...] = ('externalevent', 'session')
 
     def __init__(
         self,
@@ -726,39 +815,49 @@ class ConnectedCommunityCatalogSource:
         self._user_agent = user_agent
 
     @property
-    def _events_url(self) -> str:
-        """The Connected Community external-event JSON endpoint URL."""
-        return f'{self._base_url}/{self._segment_path}/api/externalevent'
+    def _page_base(self) -> str:
+        """The segment page base used to resolve ``urlSlug`` event links."""
+        return f'{self._base_url}/{self._segment_path}'
 
-    async def fetch_raw_records(self) -> list[dict]:
-        """Fetch the Connected Community events as flat parser-ready records.
+    def _feed_url(self, feed: str) -> str:
+        """Build the JSON endpoint URL for a segment API feed.
+
+        Args:
+            feed: The feed name (e.g. ``externalevent`` or ``session``).
 
         Returns:
-            A flat list of mapped record dicts (the ``future`` bucket followed by
-            the ``past`` bucket). An empty list denotes a reachable hub with no
-            events.
+            The absolute feed URL.
+        """
+        return f'{self._base_url}/{self._segment_path}/api/{feed}'
+
+    async def _fetch_feed(self, client: httpx.AsyncClient, feed: str) -> list[dict]:
+        """Fetch one segment feed and map its buckets into flat records.
+
+        Args:
+            client: The async HTTP client to use.
+            feed: The feed name to fetch.
+
+        Returns:
+            The mapped records from the feed's ``future`` and ``past`` buckets.
 
         Raises:
-            CatalogUnreachableError: The source could not be reached (Req 11.1).
-            CatalogTimeoutError: The request exceeded the 30 second limit (Req 11.2).
+            CatalogUnreachableError: The feed could not be reached (Req 11.1).
+            CatalogTimeoutError: The request exceeded the limit (Req 11.2).
             CatalogUnparseableError: The body was not decodable JSON, or carried
                 neither a ``future`` nor a ``past`` bucket (Requirement 11.3).
         """
-        headers = {'User-Agent': self._user_agent, 'Accept': 'application/json'}
-        async with httpx.AsyncClient(timeout=self._timeout, headers=headers) as client:
-            response = await _request(client, self._events_url)
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise CatalogUnparseableError(
-                    'The AWS Connected Community response could not be interpreted as JSON.'
-                ) from exc
-
-        if not isinstance(payload, dict) or (
-            'future' not in payload and 'past' not in payload
-        ):
+        response = await _request(client, self._feed_url(feed))
+        try:
+            payload = response.json()
+        except ValueError as exc:
             raise CatalogUnparseableError(
-                'The AWS Connected Community response contained no recognizable event buckets.'
+                f'The AWS Connected Community {feed} response could not be interpreted as JSON.'
+            ) from exc
+
+        if not isinstance(payload, dict) or ('future' not in payload and 'past' not in payload):
+            raise CatalogUnparseableError(
+                f'The AWS Connected Community {feed} response contained no '
+                'recognizable event buckets.'
             )
 
         records: list[dict] = []
@@ -766,9 +865,54 @@ class ConnectedCommunityCatalogSource:
             items = payload.get(bucket)
             if isinstance(items, list):
                 for event in items:
-                    mapped = _map_connected_community_event(event)
+                    mapped = _map_connected_community_event(event, page_base=self._page_base)
                     if mapped is not None:
                         records.append(mapped)
+        return records
+
+    async def fetch_raw_records(self) -> list[dict]:
+        """Fetch the Connected Community events as flat parser-ready records.
+
+        Fetches the ``externalevent`` and ``session`` feeds concurrently and
+        concatenates their mapped records (each feed's ``future`` bucket before
+        its ``past`` bucket). If some feeds fail while others succeed, a warning
+        is logged and the successful records are returned.
+
+        Returns:
+            A flat list of mapped record dicts across all feeds. An empty list
+            denotes a reachable hub with no events.
+
+        Raises:
+            CatalogUnreachableError: Every feed was unreachable (Req 11.1).
+            CatalogTimeoutError: Every feed timed out first (Req 11.2).
+            CatalogUnparseableError: Every feed failed and the first failure was
+                an undecodable body (Requirement 11.3).
+        """
+        headers = {'User-Agent': self._user_agent, 'Accept': 'application/json'}
+        async with httpx.AsyncClient(timeout=self._timeout, headers=headers) as client:
+            results = await asyncio.gather(
+                *(self._fetch_feed(client, feed) for feed in self._FEEDS),
+                return_exceptions=True,
+            )
+
+        records: list[dict] = []
+        failures: list[tuple[str, BaseException]] = []
+        for feed, result in zip(self._FEEDS, results):
+            if isinstance(result, BaseException):
+                failures.append((feed, result))
+            else:
+                records.extend(result)
+
+        if failures and len(failures) == len(self._FEEDS):
+            raise failures[0][1]
+
+        if failures:
+            failed = ', '.join(feed for feed, _ in failures)
+            logger.warning(
+                f'AWS Connected Community: {len(failures)} of {len(self._FEEDS)} feed(s) '
+                f'failed ({failed}); returning records from the remaining feed(s).'
+            )
+
         return records
 
 

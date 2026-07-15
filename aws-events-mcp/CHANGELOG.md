@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- The Connected Community source now also fetches the segment's `session` feed
+  (`<base>/<segment>/api/session`) alongside `externalevent`, unioning both concurrently. The
+  session feed is the segment's own workshops/talks/meetups catalog (the one the site's search
+  page draws from) and is far larger (~370 future events vs ~18), including named-model events
+  such as Claude and OpenAI workshops.
+- Session records map their `urlSlug` to a per-event page link (`<base>/<segment>/e/<slug>`),
+  their `type` facet to a readable event type (Hands-on Workshop / Tech Talk / Business Talk /
+  Meetup), and physical sessions extract the venue address or city from
+  `settingDetails[].details`.
+- Per-feed graceful degradation within the source: if one Connected Community feed fails, a
+  warning is logged and the other feed's records are returned; only a total feed outage
+  surfaces as a source error.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added
