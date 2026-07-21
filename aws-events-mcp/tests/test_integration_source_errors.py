@@ -35,14 +35,16 @@ cache -> tool path:
   parse (each missing the required ``title``), so the *real* parser skips them
   all and the *real* cache raises ``CatalogUnparseableError`` ->
   ``source_unparseable`` (Requirement 11.3);
-* partially unparseable -- the fake returns a mix of valid records
+* partially parseable -- the fake returns a mix of valid records
   (``event_id`` / ``title`` / ``start_date``) and invalid records (missing
   ``title``), so the real parser produces some-but-not-all events and the real
-  cache raises ``CatalogPartialParseError`` -> ``source_partial``
+  cache returns the successfully parsed event(s). A partial parse is a
+  successful, degraded result (not an error), so the tool returns a success
+  ``list_events`` response containing the valid event(s), never ``source_partial``
   (Requirement 11.4).
 
-For every case the response is asserted to be an error carrying ``items == []``
-and ``total_count == 0`` (Requirement 11.5).
+For every failure case the response is asserted to be an error carrying
+``items == []`` and ``total_count == 0`` (Requirement 11.5).
 
 The async tool is driven via ``asyncio.run`` from synchronous tests, and the
 injected global cache is always cleared with ``set_catalog_cache(None)`` in a
@@ -217,14 +219,19 @@ def test_wholly_unparseable_maps_to_source_unparseable() -> None:
     _assert_source_error(response, 'source_unparseable')
 
 
-def test_partially_parseable_maps_to_source_partial() -> None:
-    """Mixed valid/invalid content maps to ``source_partial`` (Req 11.4).
+def test_partially_parseable_returns_parsed_events() -> None:
+    """Mixed valid/invalid content returns a success response with the valid event (Req 11.4).
 
     The real parser produces one event from the valid record and skips the
-    invalid one, so the real cache raises ``CatalogPartialParseError``.
+    invalid one, so the real cache returns the successfully parsed event. A
+    partial parse is a successful, degraded result, so the tool returns a
+    success response containing the valid event rather than ``source_partial``.
     """
     response = _invoke_list_events(_RecordsSource([_valid_record('good'), _invalid_record('bad')]))
-    _assert_source_error(response, 'source_partial')
+    assert response['status'] == 'success'
+    assert response.get('error_type') != 'source_partial'
+    assert len(response['items']) == 1
+    assert response['total_count'] == 1
 
 
 @pytest.mark.parametrize(
@@ -233,15 +240,16 @@ def test_partially_parseable_maps_to_source_partial() -> None:
         (_RaisingSource(CatalogUnreachableError('connection failed')), 'source_unreachable'),
         (_RaisingSource(CatalogTimeoutError('timed out')), 'source_timeout'),
         (_RecordsSource([_invalid_record('a'), _invalid_record('b')]), 'source_unparseable'),
-        (_RecordsSource([_valid_record('ok'), _invalid_record('x')]), 'source_partial'),
     ],
 )
 def test_all_source_failures_carry_no_records(source: Any, expected_error_type: str) -> None:
-    """Every source-failure response excludes catalog data (Req 11.5).
+    """Every genuine source-failure response excludes catalog data (Req 11.5).
 
-    Covers all four mappings in one place to assert the shared invariant that an
-    error result carries an empty ``items`` collection and a ``total_count`` of
-    zero.
+    Covers the unreachable, timeout, and wholly-unparseable mappings in one place
+    to assert the shared invariant that an error result carries an empty
+    ``items`` collection and a ``total_count`` of zero. A partial parse is not a
+    failure and is covered separately by
+    ``test_partially_parseable_returns_parsed_events``.
     """
     response = _invoke_list_events(source)
     _assert_source_error(response, expected_error_type)

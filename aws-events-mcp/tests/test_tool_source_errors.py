@@ -34,10 +34,12 @@ protocol's async ``fetch_raw_records`` and, per test, either raises a
 * returning wholly unparseable records (non-empty, all skipped by the parser) ->
   the cache raises ``CatalogUnparseableError`` -> ``source_unparseable``
   (Requirement 11.3)
-* returning mixed valid/invalid records -> the cache raises
-  ``CatalogPartialParseError`` -> ``source_partial`` (Requirement 11.4)
+* returning mixed valid/invalid records -> a partial parse is a successful,
+  degraded result: the cache returns the successfully parsed event(s) and the
+  tool returns a success response containing them, never ``source_partial``
+  (Requirement 11.4)
 
-In every case the response must carry no items and a zero total count
+In every error case the response must carry no items and a zero total count
 (Requirements 2.5, 11.5).
 
 The stub is injected with ``set_catalog_cache(CatalogCache(stub, ttl_seconds=...))``
@@ -239,21 +241,25 @@ async def test_list_events_maps_wholly_unparseable_content(install_stub_cache) -
     _assert_source_error(response, 'source_unparseable')
 
 
-async def test_list_events_maps_partial_content(install_stub_cache) -> None:
-    """Mixed valid/invalid content maps to ``source_partial`` with no items.
+async def test_list_events_partial_content_returns_parsed_events(install_stub_cache) -> None:
+    """Mixed valid/invalid content returns a success response with the valid event(s).
 
     The stub returns one valid and one invalid record, so the real
-    ``CatalogCache`` raises ``CatalogPartialParseError`` (some but not all
-    parsed), which the tool maps to ``source_partial``. Per Requirement 11.5 the
-    partially parsed data is excluded from the response.
+    ``CatalogCache`` returns the successfully parsed event (a partial parse is a
+    successful, degraded result, not an error). The tool therefore returns a
+    success response whose items contain the parsed event, never
+    ``source_partial``.
 
-    Validates: Requirements 11.4, 11.5
+    Validates: Requirement 11.4
     """
     install_stub_cache(StubCatalogSource(records=[dict(_VALID_RECORD), dict(_INVALID_RECORD)]))
 
     response = await _call_list_events()
 
-    _assert_source_error(response, 'source_partial')
+    assert response['status'] == 'success'
+    assert response.get('error_type') != 'source_partial'
+    assert len(response['items']) == 1
+    assert response['total_count'] == 1
 
 
 async def test_search_events_maps_source_errors_identically(install_stub_cache) -> None:

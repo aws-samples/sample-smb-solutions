@@ -1,7 +1,7 @@
 [project]
 name = "aws-events-mcp"
 
-version = "0.1.1"
+version = "0.4.1"
 
 description = "AWS Events MCP Server - discover, search, and filter the public AWS Events catalog over the Model Context Protocol"
 readme = "README.md"
@@ -103,7 +103,7 @@ exclude = ["**/__pycache__", "**/.venv", "**/node_modules", "**/dist", "**/build
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.1"
+version = "0.4.1"
 tag_format = "v$version"
 version_files = [
     "pyproject.toml:version",

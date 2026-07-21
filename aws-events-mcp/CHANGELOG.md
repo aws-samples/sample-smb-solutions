@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-13
+
+### Changed
+
+- Every event in a response now always carries at least one link: when an upstream record has
+  neither a registration nor a learn-more link, the parser falls back to the public AWS Events
+  catalog page (`https://aws.amazon.com/events/explore-aws-events/`) as the `learn_more_url`,
+  so results are always actionable.
+
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- The Connected Community source now also fetches the segment's `session` feed
+  (`<base>/<segment>/api/session`) alongside `externalevent`, unioning both concurrently. The
+  session feed is the segment's own workshops/talks/meetups catalog (the one the site's search
+  page draws from) and is far larger (~370 future events vs ~18), including named-model events
+  such as Claude and OpenAI workshops.
+- Session records map their `urlSlug` to a per-event page link (`<base>/<segment>/e/<slug>`),
+  their `type` facet to a readable event type (Hands-on Workshop / Tech Talk / Business Talk /
+  Meetup), and physical sessions extract the venue address or city from
+  `settingDetails[].details`.
+- Per-feed graceful degradation within the source: if one Connected Community feed fails, a
+  warning is logged and the other feed's records are returned; only a total feed outage
+  surfaces as a source error.
+
+## [0.3.0] - 2026-07-07
+
+### Added
+
+- The catalog now unions a fourth upstream source: the AWS Connected Community events hub
+  (`aws-experience.com`). `ConnectedCommunityCatalogSource` issues a single credential-free
+  GET against `<base>/<segment>/api/externalevent` (default segment `amer/smb`), reads the
+  `future` and `past` buckets, and maps each flat event object into the existing lenient
+  parser's record shape (delivery mode from `settingDetails`, lowest numeric `levels` entry as
+  the learning level, localized start time and IANA time zone preserved).
+- Environment toggle `AWS_EVENTS_ENABLE_CONNECTED_COMMUNITY` (enabled by default) plus
+  overrides for the Connected Community base URL (`AWS_EVENTS_CONNECTED_COMMUNITY_BASE_URL`)
+  and region/segment path (`AWS_EVENTS_CONNECTED_COMMUNITY_SEGMENT_PATH`).
+
+### Notes
+
+- The Connected Community `externalevent` endpoint is region/segment scoped. The default
+  `amer/smb` segment matches the referenced public page
+  (`https://aws-experience.com/amer/smb/events`); other regions (e.g. `emea/smb`) return
+  distinct, non-overlapping catalogs and can be selected via the segment-path override.
+
+## [0.2.0] - 2026-07-07
+
+### Added
+
+- The catalog is now a union of three upstream sources: the existing AWS Events catalog, the
+  AWS Summits interactive-cards hub (same content-directory API, different directory id), and
+  the AWS Builder Loft calendar (Cvent-backed, retrieved via a guest-token props endpoint).
+- `CompositeCatalogSource` fetches all enabled sources concurrently, concatenates and
+  de-duplicates their records, and degrades gracefully: if some sources fail it logs a warning
+  and returns the records from the sources that succeeded; only a total outage surfaces as a
+  source error.
+- `BuilderLoftCatalogSource` implements the two-step Builder Loft flow (scrape the short-lived
+  guest bearer token from the calendar HTML shell, then read events from the calendar props
+  JSON endpoint) and maps each event into the existing lenient parser's record shape.
+- Environment toggles `AWS_EVENTS_ENABLE_SUMMITS` and `AWS_EVENTS_ENABLE_BUILDER_LOFT` (both
+  enabled by default) plus overrides for the Summits directory id and Builder Loft calendar
+  id / base URL.
+
+### Notes
+
+- The AWS Builder Loft source returns only its default upcoming set (~20 events) exposed by the
+  guest-token props endpoint; full history pagination is not yet implemented.
+
+## [0.1.2] - 2026-07-05
+
+### Fixed
+
+- A partial parse of the upstream catalog (some but not all records parse) now returns the
+  successfully parsed events as a successful, degraded result instead of an empty
+  `source_partial` error that discarded them. This fixes intermittent empty results. Only a
+  wholly uninterpretable response (non-empty content, zero valid events) remains an error
+  (`source_unparseable`).
+
+### Changed
+
+- The upstream catalog request now matches the live catalog page: it excludes third-party and
+  archived items via `tags.id` exclusion filters and adds `sort_by`/`sort_order`, aligning the
+  catalog size returned by the server with what the website shows.
+
 ## [0.1.1] - 2026-06-25
 
 ### Added
@@ -38,6 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Distribution artifacts: `pyproject.toml` (uv/hatchling), Dockerfile, and standard
   documentation files (`README.md`, `CHANGELOG.md`, `LICENSE`, `NOTICE`).
 
-[Unreleased]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/aws-samples/sample-smb-solutions/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/aws-samples/sample-smb-solutions/releases/tag/v0.1.0

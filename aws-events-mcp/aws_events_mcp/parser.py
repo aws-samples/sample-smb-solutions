@@ -142,6 +142,10 @@ _URL_FIELDS: tuple[str, ...] = ('registration_url', 'learn_more_url')
 #: Base used to resolve site-relative upstream links to absolute URLs.
 _ABSOLUTE_URL_BASE = 'https://aws.amazon.com'
 
+#: Fallback details link applied when a record carries no link of its own, so
+#: every event in a response always includes at least one actionable URL.
+_FALLBACK_EVENT_URL = 'https://aws.amazon.com/events/explore-aws-events/'
+
 #: Tag namespace carrying the catalog's delivery facet (task 8.2). Its tag
 #: names (``on-demand`` / ``virtual`` / ``in-person``) drive location-mode
 #: derivation when no explicit mode column is present.
@@ -301,6 +305,12 @@ def _map_record(record: Mapping[str, Any]) -> dict[str, Any]:
     for url_field in _URL_FIELDS:
         if url_field in mapped:
             mapped[url_field] = _resolve_url(mapped[url_field])
+
+    # Guarantee every event carries at least one link: when a record has
+    # neither a registration nor a learn-more link, fall back to the public
+    # AWS Events catalog page so responses are always actionable.
+    if not mapped.get('registration_url') and not mapped.get('learn_more_url'):
+        mapped['learn_more_url'] = _FALLBACK_EVENT_URL
 
     mapped['location_mode'] = _derive_location_mode(fields, tags)
 

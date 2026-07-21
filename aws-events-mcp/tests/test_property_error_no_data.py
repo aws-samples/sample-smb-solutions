@@ -15,22 +15,23 @@
 """Property-based test that error responses carry no catalog data.
 
 Property 17 asserts that every error result the server can return -- a source
-that is unreachable, timed out, wholly unparseable, or partially unparseable, as
-well as an input-validation failure -- carries an empty item collection and a
-total count of zero, so no partial or unparsed catalog data ever leaks into an
-error result (Requirements 2.5, 11.5).
+that is unreachable, timed out, or wholly unparseable, as well as an
+input-validation failure -- carries an empty item collection and a total count
+of zero, so no partial or unparsed catalog data ever leaks into an error result
+(Requirements 2.5, 11.5).
 
 The property is exercised against the real response-shaping helpers rather than a
 reimplementation:
 
 * Source errors are produced by constructing each ``CatalogSourceError`` subtype
   (:class:`~aws_events_mcp.errors.CatalogUnreachableError`,
-  :class:`~aws_events_mcp.errors.CatalogTimeoutError`,
-  :class:`~aws_events_mcp.errors.CatalogUnparseableError`, and
-  :class:`~aws_events_mcp.errors.CatalogPartialParseError`) with a generated
+  :class:`~aws_events_mcp.errors.CatalogTimeoutError`, and
+  :class:`~aws_events_mcp.errors.CatalogUnparseableError`) with a generated
   message and mapping it through
   :func:`~aws_events_mcp.server.build_source_error_response`, which routes on the
-  exception's ``error_type`` exactly as the tool layer does.
+  exception's ``error_type`` exactly as the tool layer does. A partial parse is
+  no longer an error path (the successfully parsed events are returned), so it is
+  not exercised here.
 * Validation errors are produced both directly via
   :func:`~aws_events_mcp.errors.validation_error` and through the tool-layer path
   :func:`~aws_events_mcp.server.validation_response` over a
@@ -47,7 +48,6 @@ Validates: Requirements 2.5, 11.5
 """
 
 from aws_events_mcp.errors import (
-    CatalogPartialParseError,
     CatalogSourceError,
     CatalogTimeoutError,
     CatalogUnparseableError,
@@ -64,12 +64,13 @@ from hypothesis import strategies as st
 from typing import Any, Dict, Type
 
 
-#: The four ``CatalogSourceError`` subtypes whose mapped responses must be empty.
+#: The ``CatalogSourceError`` subtypes whose mapped responses must be empty. A
+#: partial parse is no longer an error path (the successfully parsed events are
+#: returned), so ``CatalogPartialParseError`` is not included here.
 _SOURCE_ERROR_TYPES = [
     CatalogUnreachableError,
     CatalogTimeoutError,
     CatalogUnparseableError,
-    CatalogPartialParseError,
 ]
 
 

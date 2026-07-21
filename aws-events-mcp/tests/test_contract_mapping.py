@@ -154,3 +154,39 @@ def test_parse_maps_in_person_summit_record() -> None:
     assert summit.location == 'New York, NY'
     # primaryCTALink (already absolute) is the registration URL.
     assert summit.registration_url == 'https://example.com/register'
+
+
+def test_parse_applies_fallback_link_when_record_has_none() -> None:
+    """A record with no link of its own gets the catalog-page fallback link."""
+    records = [
+        {
+            'id': 'events#no-link-record',
+            'title': 'Linkless Event',
+            'date': '2026-08-01',
+        }
+    ]
+
+    events, warnings = parse_events(records)
+
+    assert warnings == []
+    assert len(events) == 1
+    event = events[0]
+    assert event.registration_url is None
+    assert event.learn_more_url == 'https://aws.amazon.com/events/explore-aws-events/'
+
+
+def test_parse_keeps_own_link_over_fallback() -> None:
+    """A record with its own link never receives the fallback."""
+    records = [
+        {
+            'id': 'events#linked-record',
+            'title': 'Linked Event',
+            'date': '2026-08-01',
+            'registration_url': 'https://example.com/register',
+        }
+    ]
+
+    events, _ = parse_events(records)
+
+    assert events[0].registration_url == 'https://example.com/register'
+    assert events[0].learn_more_url is None
