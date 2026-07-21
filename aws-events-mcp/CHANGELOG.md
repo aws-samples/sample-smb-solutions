@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-13
+
+### Changed
+
+- Every event in a response now always carries at least one link: when an upstream record has
+  neither a registration nor a learn-more link, the parser falls back to the public AWS Events
+  catalog page (`https://aws.amazon.com/events/explore-aws-events/`) as the `learn_more_url`,
+  so results are always actionable.
+
 ## [0.4.0] - 2026-07-13
 
 ### Added
