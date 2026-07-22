@@ -1,0 +1,151 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Package manifest for the AWS Events MCP Server.
+# Describes the tool, its distributable artifacts, runtime requirements, and
+# MCP surface so registries / toolboxes can install and launch it.
+
+[tool]
+name = "aws-events-mcp"
+version = "0.4.1"
+description = "AWS Events MCP Server - discover, search, and filter upcoming AWS events (Tech Talks, webinars, Summits, Builder Loft, Connected Community) over the Model Context Protocol"
+license = "Apache-2.0"
+homepage = "https://pypi.org/project/aws-events-mcp/"
+repository = "https://github.com/aws-samples/sample-smb-solutions"
+changelog = "CHANGELOG.md"
+readme = "README.md"
+keywords = ["aws", "events", "mcp", "model-context-protocol", "summits", "webinars"]
+categories = ["mcp-server", "search", "events"]
+
+[tool.runtime]
+type = "python"
+requires-python = ">=3.10"
+entry-point = "aws_events_mcp.server:main"
+executable = "aws-events-mcp"          # console script installed by the wheel
+transport = ["stdio", "sse", "streamable-http"]
+default-transport = "stdio"
+
+# Runtime dependencies (mirrors [project.dependencies] in pyproject.toml).
+[tool.dependencies]
+httpx = "*"
+loguru = ">=0.7.3"
+mcp = ">=1.23.0"
+pydantic = ">=2.10.6"
+
+# ---------------------------------------------------------------------------
+# Distributable artifacts. The Python package is pure Python (py3-none-any),
+# so a single wheel covers every OS/architecture; the Docker image provides
+# prebuilt linux binaries for amd64 and arm64.
+# ---------------------------------------------------------------------------
+
+[[artifact]]
+kind = "wheel"
+platform = "any"                        # pure Python: linux / macos / windows, all arches
+url = "https://pypi.org/project/aws-events-mcp/0.4.1/"
+file = "aws_events_mcp-0.4.1-py3-none-any.whl"
+sha256 = "2aac5dcbf1ce8edc446f6dce355c33a7e6656f0e9911cf3b5c56b3bf0a91ff32"
+
+[[artifact]]
+kind = "sdist"
+platform = "any"
+url = "https://pypi.org/project/aws-events-mcp/0.4.1/"
+file = "aws_events_mcp-0.4.1.tar.gz"
+sha256 = "e93c7dc371176a4dbb109d1cfabf9664582897c4ddb50ab9f7719170c4739886"
+
+[[artifact]]
+kind = "docker"
+platform = "linux/amd64,linux/arm64"
+image = "okclip/aws-events-mcp"
+tag = "0.4.1"
+digest = "sha256:ecf35ed194905250dbb078a4f4d7020cb32e47a67f0c007a9d63c1f8481d4e69"
+
+# ---------------------------------------------------------------------------
+# Install / launch recipes.
+# ---------------------------------------------------------------------------
+
+[install.uvx]                           # recommended: zero-install, always latest
+command = "uvx"
+args = ["aws-events-mcp@latest"]
+
+[install.pip]
+command = "pip"
+args = ["install", "aws-events-mcp==0.4.1"]
+run = "aws-events-mcp"
+
+[install.docker]
+command = "docker"
+args = ["run", "--rm", "-i", "okclip/aws-events-mcp:latest"]
+
+# ---------------------------------------------------------------------------
+# MCP surface: the five tools registered by the server.
+# ---------------------------------------------------------------------------
+
+[[mcp.tool]]
+name = "list_events"
+summary = "List AWS events ordered by start date with optional filters (level, mode, location, type, partner, date range) and pagination."
+
+[[mcp.tool]]
+name = "list_upcoming_events"
+summary = "List events starting today (UTC) or later, with the same filters as list_events."
+
+[[mcp.tool]]
+name = "search_events"
+summary = "Keyword search over event titles and descriptions, combinable with every list_events filter."
+
+[[mcp.tool]]
+name = "search_upcoming_events"
+summary = "Keyword search restricted to events starting today (UTC) or later."
+
+[[mcp.tool]]
+name = "get_event_details"
+summary = "Retrieve the full details of a single event by its identifier; every event always includes a link."
+
+# ---------------------------------------------------------------------------
+# Upstream data sources (all public; no credentials required or used).
+# ---------------------------------------------------------------------------
+
+[[source]]
+name = "events-catalog"
+url = "https://aws.amazon.com/api/dirs/items/search"
+description = "Primary AWS Events content directory (Tech Talks, webinars, on-demand)."
+
+[[source]]
+name = "aws-summits"
+url = "https://aws.amazon.com/api/dirs/items/search"
+description = "AWS Summits interactive-cards hub (same API, dedicated directory id)."
+
+[[source]]
+name = "builder-loft"
+url = "https://events.builder.aws.com"
+description = "AWS Builder Loft calendar (Cvent-backed, guest-token flow)."
+
+[[source]]
+name = "connected-community"
+url = "https://aws-experience.com/amer/smb/api"
+description = "AWS Connected Community externalevent + session feeds (segment configurable)."
+
+# ---------------------------------------------------------------------------
+# Environment configuration (all optional).
+# ---------------------------------------------------------------------------
+
+[env]
+FASTMCP_LOG_LEVEL = { default = "INFO", description = "Logging level (stderr)." }
+FASTMCP_TRANSPORT = { default = "stdio", description = "MCP transport: stdio, sse, or streamable-http." }
+AWS_EVENTS_CACHE_TTL_SECONDS = { default = "900", description = "In-memory catalog cache TTL." }
+AWS_EVENTS_CATALOG_ENDPOINT_URL = { description = "Override the primary content-directory endpoint." }
+AWS_EVENTS_CATALOG_DIRECTORY_ID = { description = "Override the primary directory identifier." }
+AWS_EVENTS_ENABLE_SUMMITS = { default = "true", description = "Toggle the AWS Summits source." }
+AWS_EVENTS_ENABLE_BUILDER_LOFT = { default = "true", description = "Toggle the Builder Loft source." }
+AWS_EVENTS_ENABLE_CONNECTED_COMMUNITY = { default = "true", description = "Toggle the Connected Community source." }
+AWS_EVENTS_CONNECTED_COMMUNITY_SEGMENT_PATH = { default = "amer/smb", description = "Connected Community region/segment (e.g. emea/smb)." }
