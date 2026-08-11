@@ -18,4 +18,4 @@ A Model Context Protocol server that exposes the public AWS Events catalog as a
 set of programmatic tools for discovering, searching, and filtering AWS events.
 """
 
-__version__ = '0.4.1'
+__version__ = '0.4.2'

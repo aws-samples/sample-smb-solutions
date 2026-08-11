@@ -1,7 +1,7 @@
 [project]
 name = "aws-events-mcp"
 
-version = "0.4.1"
+version = "0.4.2"
 
 description = "AWS Events MCP Server - discover, search, and filter the public AWS Events catalog over the Model Context Protocol"
 readme = "README.md"
@@ -9,7 +9,9 @@ requires-python = ">=3.10"
 dependencies = [
     "httpx",
     "loguru>=0.7.3",
-    "mcp>=1.23.0",
+    # mcp 2.0.0 removed the bundled `mcp.server.fastmcp` module that server.py imports.
+    # Keep the upper bound until the server is migrated to the 2.x API.
+    "mcp>=1.23.0,<2.0.0",
     "pydantic>=2.10.6",
 ]
 license = {text = "Apache-2.0"}
@@ -103,7 +105,7 @@ exclude = ["**/__pycache__", "**/.venv", "**/node_modules", "**/dist", "**/build
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.4.1"
+version = "0.4.2"
 tag_format = "v$version"
 version_files = [
     "pyproject.toml:version",

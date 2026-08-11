@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-07-13
+## [0.4.2] - 2026-08-11
+
+### Fixed
+
+- Constrained the `mcp` dependency to `>=1.23.0,<2.0.0`. `mcp` 2.0.0 removed the bundled
+  `mcp.server.fastmcp` module that `server.py` imports, so fresh installs resolved to `mcp`
+  2.0.0 and failed at startup with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`.
+  The unbounded requirement also produced a pip dependency-conflict warning in environments
+  that already had the standalone `fastmcp` 2.x package installed (it pins `mcp<1.17.0`).
 
 ### Changed
 

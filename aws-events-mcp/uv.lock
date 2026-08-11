@@ -53,7 +53,7 @@ wheels = [
 
 [[package]]
 name = "aws-events-mcp"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -78,7 +78,7 @@ dev = [
 requires-dist = [
     { name = "httpx" },
     { name = "loguru", specifier = ">=0.7.3" },
-    { name = "mcp", specifier = ">=1.23.0" },
+    { name = "mcp", specifier = ">=1.23.0,<2.0.0" },
     { name = "pydantic", specifier = ">=2.10.6" },
 ]
 
